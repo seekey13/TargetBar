@@ -405,6 +405,10 @@ local function resist_line(res)
     return mods;
 end
 
+local preview_resists = resist_line({
+    Modifiers = { Fire = 1.25, Ice = 0.5 },
+});
+
 local function load_zone(zone)
     zone = tonumber(zone) or 0;
     if zone == mob_zone then return; end
@@ -1001,6 +1005,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
         end
     elseif config_open then
         draw_name(dl, x, y, w, 'Target');
+        draw_resists(dl, x, y, w, h, preview_resists);
     end
     if config_open then
         drag_y(x, y, w, h);

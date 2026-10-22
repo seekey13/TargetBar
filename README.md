@@ -18,7 +18,7 @@ On a 3440x1440 display the bar starts at 480 by 28, with its top at Y 706, so it
 
 ## Place it
 
-`/tb` opens the settings window and, until you target something, a full bar and the name "Target" so you can see the size. The window is the Vanacore panel Sidekick Settings uses: the same dark page, Segoe UI, and sliders. Drag its title to move it. Click a slider's number to type one.
+`/tb` opens the settings window and, until you target something, a full bar, the name "Target", and sample weakness/resistance indicators (`Fire +25%`, `Ice -50%`) so you can see the layout. The window is the Vanacore panel Sidekick Settings uses: the same dark page, Segoe UI, and sliders. Drag its title to move it. Click a slider's number to type one.
 
 - Drag the bar up or down. It stays centered.
 - Width, height, and Y are the three sliders. Reset returns the defaults.
