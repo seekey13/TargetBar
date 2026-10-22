@@ -25,11 +25,14 @@ sizes this HUD is set to.
 
 HP comes from the main target, the same read as HXUI's target bar:
 GetTarget():GetTargetIndex(0), then that entity's HP percent.
+
+The settings window is drawn the way Sidekick Settings is (see the
+comment above P).
 ]]--
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.2.0';
+addon.version  = '1.3.0';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -42,10 +45,9 @@ local ffi_ok, ffi = pcall(require, 'ffi');
 local d3d_ok, d3d = pcall(require, 'd3d8');
 local textures = ffi_ok and d3d_ok;
 
--- Defaults put a 480x28 bar on the center of a 3440x1440 screen.
+-- A 480x28 bar. Until it is placed, it sits on the vertical center of the screen.
 local DEFAULT_WIDTH  = 480;
 local DEFAULT_HEIGHT = 28;
-local DEFAULT_Y      = 706;
 
 local WIDTH_MIN, WIDTH_MAX   = 40, 5120;
 local HEIGHT_MIN, HEIGHT_MAX = 8, 160;
@@ -87,10 +89,10 @@ local SENSES = { 'TrueSight', 'Sight', 'Sound', 'Scent', 'Magic', 'JA', 'Blood' 
 -- 1.92 names the flag one way, 1.81 another. Nil rounds every corner.
 local LEFT_CORNERS = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left;
 
+-- No y: the bar is centered until it is placed (see bar_rect).
 local defaults = T{
     width  = DEFAULT_WIDTH,
     height = DEFAULT_HEIGHT,
-    y      = DEFAULT_Y,
     show_name = true,
     show_hp = true,
     show_detection = true,
@@ -105,34 +107,25 @@ local config_state = { true };
 local dirty        = false;
 local drag_origin  = nil;
 local drag_state   = { true };
-local shown_hpp   = nil;
-local shown_id    = nil;
-local shown_at    = nil;
+local drag_fault   = nil;
+local shown_hpp    = nil;
+local shown_id     = nil;
+local shown_at     = nil;
 
--- Segoe UI, once ImGui can take a font at a size (1.92). Semibold is the HUD.
--- Regular is the settings window's labels. Until a face is ready, text is
--- ImGui's own font scaled to the same pixel size. A face added this frame is
--- not in the atlas yet, so it is drawn from the next frame.
-local face         = nil;
-local face_text    = nil;
-local face_custom  = false;
-local face_pending = nil;
-local face_tried   = false;
-local dynamic_font = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200;
+-- Segoe UI, once ImGui can take a font at a size (1.92): semibold for the
+-- HUD and the window's title, regular for its labels, semibold italic for
+-- its group headings. Until a face is ready, and always on 1.81, each is
+-- ImGui's own font scaled to the same pixel size. A face added this frame
+-- is not in the atlas yet, so it is drawn from the next frame.
+local fonts         = {};
+local custom        = false;
+local fonts_tried   = false;
+local fonts_pending = nil;
+local dynamic_font  = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200;
 
 local mob_db   = nil;
 local mob_zone = -1;
 local icon_cache = {};
-
-local DRAG_FLAGS = bit.bor(
-    ImGuiWindowFlags_NoDecoration,
-    ImGuiWindowFlags_NoBackground,
-    ImGuiWindowFlags_NoNavInputs,
-    ImGuiWindowFlags_NoMove,
-    ImGuiWindowFlags_NoFocusOnAppearing,
-    ImGuiWindowFlags_NoBringToFrontOnFocus,
-    ImGuiWindowFlags_NoSavedSettings
-);
 
 local function flag_set(...)
     local n = 0;
@@ -143,7 +136,19 @@ local function flag_set(...)
     return n;
 end
 
+local DRAG_FLAGS = flag_set(
+    ImGuiWindowFlags_NoDecoration,
+    ImGuiWindowFlags_NoBackground,
+    ImGuiWindowFlags_NoNavInputs,
+    ImGuiWindowFlags_NoMove,
+    ImGuiWindowFlags_NoFocusOnAppearing,
+    ImGuiWindowFlags_NoBringToFrontOnFocus,
+    ImGuiWindowFlags_NoSavedSettings
+);
+
 -- ImGui draws none of the settings window. NoNavInputs: Tab stays the game's.
+-- It is not NoMove: a drag on any empty part of it moves it, as Sidekick
+-- Settings does. The controls' invisible buttons take their own presses.
 local PANEL_FLAGS = flag_set(
     ImGuiWindowFlags_NoTitleBar,
     ImGuiWindowFlags_NoResize,
@@ -152,6 +157,12 @@ local PANEL_FLAGS = flag_set(
     ImGuiWindowFlags_NoCollapse,
     ImGuiWindowFlags_NoBackground,
     ImGuiWindowFlags_NoNavInputs
+);
+
+local INPUT_FLAGS = flag_set(
+    ImGuiInputTextFlags_CharsDecimal,
+    ImGuiInputTextFlags_EnterReturnsTrue,
+    ImGuiInputTextFlags_AutoSelectAll
 );
 
 local function say(text)
@@ -168,7 +179,7 @@ local function clamp(v, lo, hi, fallback)
 end
 
 -- A missing flag stays on, so an older settings file keeps the current look.
-local function shown(value)
+local function on_unless_off(value)
     if value == nil then return true; end
     return value == true;
 end
@@ -176,12 +187,12 @@ end
 local function sanitize()
     cfg.width  = clamp(cfg.width, WIDTH_MIN, WIDTH_MAX, DEFAULT_WIDTH);
     cfg.height = clamp(cfg.height, HEIGHT_MIN, HEIGHT_MAX, DEFAULT_HEIGHT);
-    cfg.y      = clamp(cfg.y, Y_MIN, Y_MAX, DEFAULT_Y);
-    cfg.show_name = shown(cfg.show_name);
-    cfg.show_hp = shown(cfg.show_hp);
-    cfg.show_detection = shown(cfg.show_detection);
-    cfg.show_weakness = shown(cfg.show_weakness);
-    cfg.show_resistance = shown(cfg.show_resistance);
+    if cfg.y ~= nil then cfg.y = clamp(cfg.y, Y_MIN, Y_MAX, nil); end
+    cfg.show_name = on_unless_off(cfg.show_name);
+    cfg.show_hp = on_unless_off(cfg.show_hp);
+    cfg.show_detection = on_unless_off(cfg.show_detection);
+    cfg.show_weakness = on_unless_off(cfg.show_weakness);
+    cfg.show_resistance = on_unless_off(cfg.show_resistance);
 end
 
 sanitize();
@@ -201,13 +212,14 @@ local function xy(a, b)
     return tonumber(x) or 0, tonumber(y) or 0;
 end
 
+-- The screen's size, 1920 by 1080 until ImGui says (Sidekick3's kit.screen).
 local function screen()
     local ok, d = pcall(function () return imgui.GetIO().DisplaySize; end);
     if ok and d ~= nil then
         local w, h = xy(d);
         if w > 0 and h > 0 then return w, h; end
     end
-    return 3440, 1440;
+    return 1920, 1080;
 end
 
 -- '#RRGGBB' and an alpha to an ImU32 (0xAABBGGRR).
@@ -219,6 +231,7 @@ local function u32(hex, alpha)
     return ((a * 256 + b) * 256 + g) * 256 + r;
 end
 
+-- (corners nil rounds all four: it isn't passed, as 1.81 reads 0 as none and 1.92 as all.)
 local function fill(dl, x, y, w, h, color, radius, alpha, corners)
     if w <= 0 or h <= 0 then return; end
     local p, q, col = { x, y }, { x + w, y + h }, u32(color, alpha);
@@ -231,6 +244,19 @@ end
 
 local function is_mob(flags)
     return type(flags) == 'number' and bit.band(flags, 0x10) ~= 0;
+end
+
+-- A trust carries the mob flag but is a party member. Its mobdb row, if
+-- one matched, would be a namesake's (a BCNM's Shantotto, say).
+local function in_party(sid)
+    local ok, yes = pcall(function ()
+        local party = AshitaCore:GetMemoryManager():GetParty();
+        for i = 0, 17 do
+            if party:GetMemberIsActive(i) == 1 and party:GetMemberServerId(i) == sid then return true; end
+        end
+        return false;
+    end);
+    return ok and yes == true;
 end
 
 -- The main target. Index 0 is "no target". HXUI reads this same index and HPPercent.
@@ -270,7 +296,8 @@ local function read_target()
         hpp = tonumber(hpp) or 0;
         if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
         if sid == nil or sid == 0 then sid = index; end
-        return { id = sid, hpp = hpp, name = name, index = index, mob = mob == true };
+        mob = mob == true and not in_party(sid);
+        return { id = sid, hpp = hpp, name = name, index = index, mob = mob };
     end);
     if ok then return found; end
     return nil;
@@ -295,15 +322,15 @@ local function smooth(id, hpp)
 end
 
 local function font_frame()
-    if face_pending ~= nil then
-        face = face_pending.semi or face_pending.text;
-        face_text = face_pending.text or face;
-        face_custom = face ~= nil;
-        face_pending = nil;
+    if fonts_pending ~= nil then
+        fonts, fonts_pending, custom = fonts_pending, nil, true;
         return;
     end
-    if face_custom or face_tried or not dynamic_font then return; end
-    face_tried = true;
+    if custom then return; end
+    local own = imgui.GetFont();
+    fonts.text, fonts.semi, fonts.semi_italic = own, own, own;
+    if fonts_tried or not dynamic_font then return; end
+    fonts_tried = true;
     local dir = ((os.getenv and os.getenv('WINDIR')) or 'C:\\Windows') .. '\\Fonts\\';
     local function add(file)
         local path = dir .. file;
@@ -316,63 +343,66 @@ local function font_frame()
     end
     local text = add('segoeui.ttf');
     local semi = add('seguisb.ttf') or text;
+    local semi_italic = add('seguisbi.ttf') or semi;
     text = text or semi;
-    if text ~= nil then face_pending = { text = text, semi = semi }; end
+    if text ~= nil then
+        fonts_pending = { text = text, semi = semi, semi_italic = semi_italic };
+    end
 end
 
-local function font_now()
-    return face or imgui.GetFont();
-end
+local measured, measured_n = {}, 0;
 
-local function font_text()
-    return face_text or font_now();
-end
-
-local function measure_wh(a, b)
-    if type(a) ~= 'number' then a, b = xy(a); end
-    return a or 0, b or 0;
-end
-
--- Width and height of `text` at `px`. With a loaded face, ImGui measures at
--- that size. Otherwise CalcTextSize is the UI font, scaled by the ratio.
+-- Width and height of `text` in `font` at `px`. With Segoe UI in, ImGui
+-- measures at that size. Otherwise CalcTextSize is the UI font, scaled by
+-- the ratio. Cached: the same strings are measured every frame.
 local function measure(text, px, font)
-    font = font or font_now();
-    if face_custom and font ~= nil then
+    font = font or fonts.semi;
+    text = tostring(text);
+    local key = tostring(font) .. '|' .. px .. '|' .. text;
+    local m = measured[key];
+    if m ~= nil then return m[1], m[2]; end
+    local w, h;
+    if custom and font ~= nil then
+        local pushed = false;
         local ok, a, b = pcall(function ()
             imgui.PushFont(font, px);
-            local w, h = imgui.CalcTextSize(text);
+            pushed = true;
+            local cw, ch = imgui.CalcTextSize(text);
             imgui.PopFont();
-            return w, h;
+            pushed = false;
+            return cw, ch;
         end);
-        if ok then return measure_wh(a, b); end
+        if pushed then pcall(imgui.PopFont); end
+        if ok then w, h = xy(a, b); end
     end
-    local w, h = measure_wh(imgui.CalcTextSize(text));
-    local base = imgui.GetFontSize();
-    if base == nil or base <= 0 then base = 13; end
-    local k = px / base;
-    return w * k, h * k;
+    if w == nil then
+        w, h = xy(imgui.CalcTextSize(text));
+        local base = tonumber(imgui.GetFontSize()) or 0;
+        if base <= 0 then base = 13; end
+        w, h = w * px / base, h * px / base;
+    end
+    if measured_n >= 4000 then measured, measured_n = {}, 0; end
+    measured[key] = { w, h };
+    measured_n = measured_n + 1;
+    return w, h;
 end
 
 -- Segoe UI's box holds a tall ascent. Centred by the box, the letters sit low.
 local function lift(h)
-    if not face_custom then return 0; end
+    if not custom then return 0; end
     return math.floor(h * 0.06 + 0.5);
 end
 
 -- Sidekick3's halo: the string in black a pixel out each way, then the fill.
 local function halo(dl, x, y, px, text)
-    local font = font_now();
+    local font = fonts.semi;
     if font == nil or text == nil or text == '' then return; end
     x, y = math.floor(x + 0.5), math.floor(y + 0.5);
     local dark, ink = u32('#000000', HALO_A), u32('#FFFFFF', 1);
-    local ok = pcall(function ()
-        for _, o in ipairs(AROUND) do
-            dl:AddText(font, px, { x + o[1], y + o[2] }, dark, text);
-        end
-        dl:AddText(font, px, { x, y }, ink, text);
-    end);
-    if ok then return; end
-    dl:AddText({ x, y }, ink, text);
+    for _, o in ipairs(AROUND) do
+        dl:AddText(font, px, { x + o[1], y + o[2] }, dark, text);
+    end
+    dl:AddText(font, px, { x, y }, ink, text);
 end
 
 local function draw_name(dl, x, y, w, name)
@@ -463,18 +493,29 @@ local function senses(res)
     return out;
 end
 
-local preview_resists = resist_line({
-    Modifiers = { Fire = 1.25, Ice = 0.5 },
-});
+-- A mob's rows are the same every frame, so each mobdb entry builds them
+-- once. Weak keys: a zone's entries go with its data.
+local built = setmetatable({}, { __mode = 'k' });
 
--- No target, settings open. Both flanks, so the bar can be placed against
--- them. A real mob replaces this with its own flags.
+local function rows_of(res)
+    local rows = built[res];
+    if rows == nil then
+        rows = { marks = resist_line(res), left = threat(res), right = senses(res) };
+        built[res] = rows;
+    end
+    return rows;
+end
+
+-- No target, settings open. Both flanks and both sides of the row under
+-- the bar, so the bar can be placed against them. A real mob replaces this
+-- with its own flags.
 local PREVIEW_MOB = {
     Aggro = true,
     Link = true,
     TrueSight = true,
     Sight = true,
     Sound = true,
+    Modifiers = { Fire = 1.25, Ice = 0.5 },
 };
 
 -- Weakness is a potency above 1. Resistance is below 1. The two never share
@@ -638,20 +679,22 @@ local function draw_bar(dl, x, y, w, h, hpp, fill_hpp)
     if cfg.show_hp then pcall(draw_label, dl, x, y, w, h, hpp); end
 end
 
+-- The bar's box: centered across, at cfg.y down, or centered down too
+-- until it has been placed. Held on the screen.
 local function bar_rect()
-    sanitize();
     local sw, sh = screen();
     local w = math.min(cfg.width, math.floor(sw));
     local h = cfg.height;
     local x = math.floor((sw - w) / 2 + 0.5);
-    local y = cfg.y;
     local limit = math.max(0, math.floor(sh - h));
+    local y = cfg.y or math.floor((sh - h) / 2 + 0.5);
     if y < 0 then y = 0; elseif y > limit then y = limit; end
     return x, y, w, h;
 end
 
 -- While the sliders are open, the bar takes the pointer so a drag sets Y
--- and the click does not also select a monster under it.
+-- and the click does not also select a monster under it. An error inside
+-- still reaches End, so ImGui stays balanced, and is said once.
 local function drag_y(x, y, w, h)
     imgui.SetNextWindowPos({ x, y }, ImGuiCond_Always);
     imgui.SetNextWindowSize({ w, h }, ImGuiCond_Always);
@@ -659,61 +702,72 @@ local function drag_y(x, y, w, h)
     imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     imgui.PushStyleVar(ImGuiStyleVar_WindowMinSize, { 1, 1 });
     drag_state[1] = true;
+    local ok, fault = true, nil;
     if imgui.Begin('TargetBar###targetbar_drag', drag_state, DRAG_FLAGS) then
-        imgui.SetCursorPos({ 0, 0 });
-        imgui.InvisibleButton('##targetbar_drag', { w, h });
-        if imgui.IsItemHovered() and ImGuiMouseCursor_ResizeNS ~= nil then
-            imgui.SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-        end
-        if imgui.IsItemActivated() then drag_origin = cfg.y; end
-        if imgui.IsItemActive() and drag_origin ~= nil then
-            local _, dy = xy(imgui.GetMouseDragDelta(0));
-            local ny = clamp(drag_origin + dy, Y_MIN, Y_MAX, cfg.y);
-            if ny ~= cfg.y then
-                cfg.y = ny;
-                dirty = true;
+        ok, fault = pcall(function ()
+            imgui.SetCursorPos({ 0, 0 });
+            imgui.InvisibleButton('##targetbar_drag', { w, h });
+            if imgui.IsItemHovered() and ImGuiMouseCursor_ResizeNS ~= nil then
+                imgui.SetMouseCursor(ImGuiMouseCursor_ResizeNS);
             end
-        end
+            if imgui.IsItemActivated() then drag_origin = y; end
+            if imgui.IsItemActive() and drag_origin ~= nil then
+                local _, dy = xy(imgui.GetMouseDragDelta(0));
+                local _, sh = screen();
+                local ny = clamp(drag_origin + dy, Y_MIN, math.max(Y_MIN, math.floor(sh - h)), y);
+                if ny ~= cfg.y then
+                    cfg.y = ny;
+                    dirty = true;
+                end
+            end
+        end);
     end
     imgui.End();
     imgui.PopStyleVar(3);
     if not imgui.IsMouseDown(0) then drag_origin = nil; end
+    if ok then
+        drag_fault = nil;
+    elseif fault ~= drag_fault then
+        drag_fault = fault;
+        say('Bar drag: ' .. tostring(fault));
+    end
 end
 
--- The settings window follows the Vanacore look: one palette, Segoe UI,
--- and every control drawn on the window's list.
--- The title bar matches Choco: 36 tall, the name in semibold at 19, and a
--- 12px close cross in a 22px box. Both sit 16 in from the plate. The cross
--- eases from dim to rose while the pointer is on it.
--- The body matches XPBar's card. Rows are 27 and start under the rule.
--- Labels are 16. The switch is 32 by 17. Sliders are 200 wide, value at
--- 14.5. Then an 8px gap, a 24px button, an 8px gap, a 13.5px hint in a
--- 16px line, and 14px at the bottom.
+-- The settings window is Sidekick Settings' look (Sidekick3's ui/kit.lua
+-- and ui/window.lua, after VanaCore's /vana window): one palette, every
+-- size through S(), every control drawn on the window's list over an
+-- invisible button, its states eased. The sizes are Sidekick Settings':
+-- a 44px title bar with the name in semibold 16 and Sidekick3's close mark,
+-- small-capital teal group headings, 30px rows with a hover band, 32 by 17
+-- switches, 180px sliders, values and buttons at 14, tooltips at 14, and
+-- notes at 14 in 22px lines. The card is XPBar's width.
 local P = {
-    bg = '#161822', border = '#2A2E3E', hover = '#1F2334',
+    bg = '#161822', border = '#2A2E3E', line = '#242838', hover = '#1F2334',
     well = '#0E1017', well_edge = '#272B3C', popup = '#0F1118',
     white = '#FFFFFF', text = '#E8EAF1', text2 = '#BDC1D0', dim = '#7B8095', faint = '#4E536A',
-    accent = '#7AA2F7', accent2 = '#A9C1FF', accent_lo = '#3E5CB3',
-    rose = '#EE6F78', knob = '#F2F3F8', off = '#2B2F42', ink = '#0B1020',
+    accent = '#7AA2F7', accent2 = '#A9C1FF', accent_lo = '#3E5CB3', accent_bg = '#1B2340',
+    teal = '#5FD3B3', rose = '#EE6F78', knob = '#F2F3F8', off = '#2B2F42',
 };
-local PAGE_W, MARGIN, TITLE_H, ROW_H = 360, 6, 36, 27;
-local LEFT, PAD, SLIDER_W = 24, 18, 200;
-local HEAD_PAD, TITLE_PX, CLOSE_BOX, CLOSE_PX = 16, 19, 22, 12;
-local BODY_GAP, BODY_BTN, BODY_HINT, BODY_BOTTOM = 8, 24, 16, 14;
+local BODY, SMALL = 16, 13.5;
+local PAGE_W, MARGIN, TITLE_H, ROW_H = 360, 6, 44, 30;
+local LEFT, PAD, SW_W, SW_H, SLIDER_W = 24, 18, 32, 17, 180;
 
+local scale = 1;
 local panel_anim, panel_at, panel_dt = {}, nil, 0;
-local panel_drag = nil;
 local panel_fault = nil;
 local typed = {};
 
+local function S(n) return math.floor(n * scale + 0.5); end
+
+-- Once a frame the window is drawn: the time since the last (capped, so a
+-- hitch takes one step), and the scale: 1440 pixels tall is 1, held between
+-- 0.75 and 1.6, then the 1.1 Sidekick Settings uses.
 local function tick()
     local now = os.clock();
-    panel_dt = 0;
-    if panel_at ~= nil then
-        panel_dt = now - panel_at;
-        if panel_dt < 0 then panel_dt = 0; elseif panel_dt > 0.1 then panel_dt = 0.1; end
-    end
+    panel_dt = panel_at and math.max(0, math.min(0.1, now - panel_at)) or 0;
     panel_at = now;
+    local _, h = screen();
+    scale = math.max(0.75, math.min(1.6, h / 1440)) * 1.1;
 end
 
 local function ease(id, target, speed)
@@ -726,12 +780,6 @@ local function ease(id, target, speed)
     end
     panel_anim[id] = v;
     return v;
-end
-
--- 1440px tall is 1, held between 0.75 and 1.6, then the 1.1 Sidekick Settings uses.
-local function panel_scale()
-    local _, h = screen();
-    return math.max(0.75, math.min(1.6, h / 1440)) * 1.1;
 end
 
 local function mix(a, b, t)
@@ -754,342 +802,329 @@ local function rgba(hex, alpha)
     };
 end
 
+-- The input half of every control: an invisible button over its box. Hovered, clicked, held.
 local function hit(id, x, y, w, h)
     imgui.SetCursorScreenPos({ x, y });
     local clicked = imgui.InvisibleButton(id, { math.max(1, w), math.max(1, h) });
-    return imgui.IsItemHovered(), clicked, imgui.IsItemActive();
+    return imgui.IsItemHovered(), clicked == true, imgui.IsItemActive();
 end
 
+-- The mouse over a box of this window, with no item made for it.
 local function over(x, y, w, h)
-    if not imgui.IsWindowHovered() or imgui.IsMouseHoveringRect == nil then return false; end
-    local ok, yes = pcall(imgui.IsMouseHoveringRect, { x, y }, { x + w, y + h }, true);
+    if not imgui.IsWindowHovered() then return false; end
+    local ok, yes = pcall(imgui.IsMouseHoveringRect, { x, y }, { x + w, y + h });
     return ok and yes == true;
 end
 
-local function plain(dl, x, y, px, color, text, font, alpha)
-    font = font or font_text();
-    if font == nil or text == nil or text == '' then return; end
-    x, y = math.floor(x + 0.5), math.floor(y + 0.5);
-    local col = u32(color, alpha or 1);
-    local ok = pcall(function () dl:AddText(font, px, { x, y }, col, text); end);
-    if not ok then dl:AddText({ x, y }, col, text); end
+local function text_at(dl, x, y, s, color, font, px, alpha)
+    dl:AddText(font, px, { math.floor(x + 0.5), math.floor(y + 0.5) }, u32(color, alpha), s);
 end
 
-local function text_mid(dl, x, cy, text, color, font, px)
-    local _, h = measure(text, px, font);
-    plain(dl, x, cy - h / 2 - lift(h), px, color, text, font);
+-- Text with its middle at cy: from x, ending at `right`, or centred on cx.
+local function text_mid(dl, x, cy, s, color, font, px, alpha)
+    local _, h = measure(s, px, font);
+    text_at(dl, x, cy - h / 2 - lift(h), s, color, font, px, alpha);
 end
 
-local function text_right(dl, right, cy, text, color, font, px)
-    local w, h = measure(text, px, font);
-    plain(dl, right - w, cy - h / 2 - lift(h), px, color, text, font);
+local function text_right(dl, right, cy, s, color, font, px, alpha)
+    local w, h = measure(s, px, font);
+    text_at(dl, right - w, cy - h / 2 - lift(h), s, color, font, px, alpha);
 end
 
-local function text_centred(dl, cx, cy, text, color, font, px)
-    local w, h = measure(text, px, font);
-    plain(dl, cx - w / 2, cy - h / 2 - lift(h), px, color, text, font);
+local function text_centred(dl, cx, cy, s, color, font, px, alpha)
+    local w, h = measure(s, px, font);
+    text_at(dl, cx - w / 2, cy - h / 2 - lift(h), s, color, font, px, alpha);
 end
 
+-- Capitals one glyph at a time, `spacing` pixels apart (ImGui has no
+-- tracking): Sidekick3's group headings. Returns the width.
+local function text_spaced(dl, x, cy, s, color, font, px, spacing)
+    local start = x;
+    for letter in s:gmatch('.') do
+        text_mid(dl, x, cy, letter, color, font, px);
+        x = x + measure(letter, px, font) + spacing;
+    end
+    if x == start then return 0; end
+    return x - start - spacing;
+end
+
+-- A tooltip by the mouse, in the palette (SetTooltip takes a printf format: its '%' are doubled).
 local function tooltip(s)
     if s == nil or s == '' then return; end
-    local colours = {
-        { ImGuiCol_PopupBg, rgba(P.popup, 0.97) },
-        { ImGuiCol_Border, rgba(P.border) },
-        { ImGuiCol_Text, rgba(P.text) },
-    };
-    local ncolor = 0;
-    for _, c in ipairs(colours) do
-        if c[1] ~= nil then
-            imgui.PushStyleColor(c[1], c[2]);
-            ncolor = ncolor + 1;
-        end
-    end
-    local pushed = 0;
-    local function style(var, value)
-        if var == nil then return; end
-        imgui.PushStyleVar(var, value);
-        pushed = pushed + 1;
-    end
-    style(ImGuiStyleVar_WindowPadding, { 9, 6 });
-    style(ImGuiStyleVar_WindowRounding, 4);
-    style(ImGuiStyleVar_PopupBorderSize, 1);
-    local font = font_text();
-    local font_on = false;
-    if face_custom and font ~= nil then
-        imgui.PushFont(font, math.floor(14 * panel_scale() + 0.5));
-        font_on = true;
-    end
+    imgui.PushStyleColor(ImGuiCol_PopupBg, rgba(P.popup, 0.97));
+    imgui.PushStyleColor(ImGuiCol_Border, rgba(P.border));
+    imgui.PushStyleColor(ImGuiCol_Text, rgba(P.text));
+    imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { S(9), S(6) });
+    imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, S(4));
+    imgui.PushStyleVar(ImGuiStyleVar_PopupRounding, S(4));
+    imgui.PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1);
+    if custom then imgui.PushFont(fonts.text, S(SMALL + 0.5)); end
     pcall(imgui.SetTooltip, (tostring(s):gsub('%%', '%%%%')));
-    if font_on then imgui.PopFont(); end
-    if pushed > 0 then imgui.PopStyleVar(pushed); end
-    if ncolor > 0 then imgui.PopStyleColor(ncolor); end
+    if custom then imgui.PopFont(); end
+    imgui.PopStyleVar(4);
+    imgui.PopStyleColor(3);
+end
+
+local POPUP_COLOURS = {
+    { ImGuiCol_PopupBg, rgba(P.popup) }, { ImGuiCol_Border, rgba(P.border) }, { ImGuiCol_Text, rgba(P.text) },
+    { ImGuiCol_Header, rgba(P.accent_bg) }, { ImGuiCol_HeaderHovered, rgba(P.hover) },
+    { ImGuiCol_HeaderActive, rgba(P.accent_lo) }, { ImGuiCol_Separator, rgba(P.line) },
+    { ImGuiCol_FrameBg, rgba(P.well) }, { ImGuiCol_FrameBgHovered, rgba(P.well) }, { ImGuiCol_FrameBgActive, rgba(P.well) },
+};
+
+-- ImGui's own popups (a typed number) in the palette, with the padding and
+-- spacing the window here takes away.
+local function push_popup_style()
+    for _, c in ipairs(POPUP_COLOURS) do imgui.PushStyleColor(c[1], c[2]); end
+    imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { S(10), S(8) });
+    imgui.PushStyleVar(ImGuiStyleVar_PopupRounding, S(5));
+    imgui.PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1);
+    imgui.PushStyleVar(ImGuiStyleVar_FramePadding, { S(8), S(4) });
+    imgui.PushStyleVar(ImGuiStyleVar_FrameRounding, S(4));
+    imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { S(8), S(6) });
+end
+
+local function pop_popup_style()
+    imgui.PopStyleVar(6);
+    imgui.PopStyleColor(#POPUP_COLOURS);
 end
 
 -- The number typed into a slider's value, once Enter is pressed.
--- Styles are popped even when the popup's widgets throw.
+-- The styles and the popup are closed even when its widgets throw.
 local function number_box(id, min, max)
-    local buf = typed[id];
-    if buf == nil then return nil; end
-    local colours = {
-        { ImGuiCol_PopupBg, rgba(P.popup) },
-        { ImGuiCol_Border, rgba(P.border) },
-        { ImGuiCol_Text, rgba(P.text) },
-        { ImGuiCol_FrameBg, rgba(P.well) },
-        { ImGuiCol_FrameBgHovered, rgba(P.well) },
-        { ImGuiCol_FrameBgActive, rgba(P.well) },
-    };
-    local ncolor, nvar = 0, 0;
-    for _, c in ipairs(colours) do
-        if c[1] ~= nil then
-            imgui.PushStyleColor(c[1], c[2]);
-            ncolor = ncolor + 1;
-        end
-    end
-    local function style(var, value)
-        if var == nil then return; end
-        imgui.PushStyleVar(var, value);
-        nvar = nvar + 1;
-    end
-    style(ImGuiStyleVar_WindowPadding, { 10, 8 });
-    style(ImGuiStyleVar_PopupRounding, 5);
-    style(ImGuiStyleVar_PopupBorderSize, 1);
-    style(ImGuiStyleVar_FrameRounding, 4);
-
-    local got, opened, font_on, width_on = nil, false, false, false;
-    local ok = pcall(function ()
-        opened = imgui.BeginPopup(id .. '.num') == true;
+    local buf, got = typed[id], nil;
+    local opened, font_on, width_on = false, false, false;
+    push_popup_style();
+    pcall(function ()
+        opened = imgui.BeginPopup(id .. '.number') == true;
         if not opened then
             typed[id] = nil;
             return;
         end
-        local font = font_text();
-        if face_custom and font ~= nil then
-            imgui.PushFont(font, math.floor(14.5 * panel_scale() + 0.5));
+        if custom then
+            imgui.PushFont(fonts.text, S(SMALL + 1));
             font_on = true;
         end
         if buf.focus then imgui.SetKeyboardFocusHere(); buf.focus = false; end
-        imgui.PushItemWidth(math.floor(90 * panel_scale() + 0.5));
+        imgui.PushItemWidth(S(90));
         width_on = true;
-        local flags = bit.bor(
-            ImGuiInputTextFlags_CharsDecimal or 0,
-            ImGuiInputTextFlags_EnterReturnsTrue or 0,
-            ImGuiInputTextFlags_AutoSelectAll or 0
-        );
-        if imgui.InputText('##' .. id .. '.typed', buf, 16, flags) then
+        if imgui.InputText('##' .. id .. '.typed', buf, 16, INPUT_FLAGS) then
             got = tonumber(buf[1]);
             imgui.CloseCurrentPopup();
         end
-        local range = ('%d to %d'):format(min, max);
-        if imgui.TextDisabled ~= nil then
-            imgui.TextDisabled(range);
-        else
-            imgui.TextUnformatted(range);
-        end
+        imgui.PopItemWidth();
+        width_on = false;
+        imgui.TextDisabled(('%d to %d'):format(min, max));
     end);
     if width_on then imgui.PopItemWidth(); end
     if font_on then imgui.PopFont(); end
     if opened then imgui.EndPopup(); end
-    if nvar > 0 then imgui.PopStyleVar(nvar); end
-    if ncolor > 0 then imgui.PopStyleColor(ncolor); end
-    if not ok then return nil; end
+    pop_popup_style();
     return got;
 end
 
--- A whole-number slider, SLIDER_W wide at scale `sc`: the track, then the value.
--- A click on the value opens a box to type one.
-local function slider(id, x, cy, value, min, max, unit, sc)
-    local function s(n) return math.floor(n * sc + 0.5); end
+-- A whole-number slider, `w` wide: the track, then the value (`unit` after
+-- it). A click on the value opens a box to type one.
+local function slider(id, x, cy, w, value, min, max, unit)
     local dl = imgui.GetWindowDrawList();
-    local value_w, gap = s(52), s(10);
-    local track = math.max(s(8), s(SLIDER_W) - value_w - gap);
-    local hovered, _, active = hit(id, x - s(4), cy - s(9), track + s(12), s(18));
+    local value_w = S(52);
+    local track = w - value_w - S(10);
+    -- The press area runs past the track's ends, so the knob drawn half past either end is still the slider's.
+    local hovered, _, active = hit(id, x - S(4), cy - S(9), track + S(12), S(18));
     local changed = false;
     if active and track > 0 then
         local mx = xy(imgui.GetMousePos());
-        local f = math.max(0, math.min(1, (mx - x) / track));
-        local v = clamp(min + (max - min) * f, min, max, value);
+        local v = clamp(min + (max - min) * math.max(0, math.min(1, (mx - x) / track)), min, max, value);
         if v ~= value then value, changed = v, true; end
     end
     local f = (max > min) and math.max(0, math.min(1, (value - min) / (max - min))) or 0;
-    local th = math.max(2, s(4));
-    fill(dl, x, cy - th / 2, track, th, P.off, th / 2, 1);
-    if f > 0 then fill(dl, x, cy - th / 2, math.max(th, track * f), th, P.accent, th / 2, 1); end
+    local th = S(4);
+    fill(dl, x, cy - th / 2, track, th, P.off, th / 2);
+    if f > 0 then fill(dl, x, cy - th / 2, math.max(th, track * f), th, P.accent, th / 2); end
     local lit = ease(id .. '.lit', (hovered or active) and 1 or 0, 22);
     local knob = active and P.accent2 or mix(P.knob, P.accent2, lit * 0.5);
-    dl:AddCircleFilled({ x + track * f, cy }, s(5.5) + s(1) * lit, u32(knob, 1), 24);
-    local vx = x + track + gap;
-    local vhov, vclick = hit(id .. '.v', vx, cy - s(10), value_w, s(20));
-    if vhov then fill(dl, vx, cy - s(10), value_w, s(20), P.hover, s(3), 1); end
-    text_right(dl, vx + value_w - s(4), cy, tostring(value) .. (unit or ''), P.text2, font_text(), s(14.5));
+    dl:AddCircleFilled({ x + track * f, cy }, S(5.5) + S(1) * lit, u32(knob), 24);
+    local vx = x + track + S(10);
+    local vhov, vclick = hit(id .. '.value', vx, cy - S(10), value_w, S(20));
+    if vhov then fill(dl, vx, cy - S(10), value_w, S(20), P.hover, S(3)); end
+    text_right(dl, vx + value_w - S(4), cy, tostring(value) .. (unit or ''), P.text2, fonts.text, S(SMALL + 0.5));
     if vclick then
         typed[id] = { tostring(value), focus = true };
-        imgui.OpenPopup(id .. '.num');
+        imgui.OpenPopup(id .. '.number');
     end
-    local entered = nil;
     if typed[id] ~= nil then
-        local ok, got = pcall(number_box, id, min, max);
-        if ok then entered = got; end
-    end
-    if entered ~= nil then
-        local v = clamp(entered, min, max, value);
-        if v ~= value then value, changed = v, true; end
+        local entered = number_box(id, min, max);
+        if entered ~= nil then
+            local v = clamp(entered, min, max, value);
+            if v ~= value then value, changed = v, true; end
+        end
     end
     return value, changed;
 end
 
--- XPBar's switch: 32 by 17, the knob slides, accent while it is on.
+-- A switch, 32 by 17: the track eases off to accent, the knob slides.
 local function switch(id, x, cy, on)
-    local sc = panel_scale();
-    local function s(n) return math.floor(n * sc + 0.5); end
-    local w, h = s(32), s(17);
+    local w, h = S(SW_W), S(SW_H);
     local y = cy - h / 2;
     local hovered, clicked = hit(id, x, y, w, h);
-    local changed = clicked == true;
-    if changed then on = not on; end
-    local t = ease(id, on and 1 or 0, 18);
+    if clicked then on = not on; end
+    local t = ease(id, on and 1 or 0);
     local dl = imgui.GetWindowDrawList();
-    fill(dl, x, y, w, h, mix(P.off, P.accent, t), h / 2, 1);
+    fill(dl, x, y, w, h, mix(P.off, P.accent, t), h / 2);
     if hovered then fill(dl, x, y, w, h, '#FFFFFF', h / 2, 0.08); end
-    local inset = s(2);
-    local r = (h - s(4)) / 2;
-    local x0 = x + inset + r;
-    local x1 = x + w - inset - r;
-    dl:AddCircleFilled({ x0 + (x1 - x0) * t, cy }, r, u32(P.knob, 1), 24);
-    return on == true, changed;
+    local r = (h - S(4)) / 2;
+    dl:AddCircleFilled({ x + S(2) + r + (w - S(4) - r * 2) * t, cy }, r, u32(P.knob), 24);
+    return on == true, clicked;
 end
 
--- Choco's close mark: a 24-unit cross, `size` across, centred on (cx, cy).
-local function cross(dl, cx, cy, size, color, alpha)
-    local k = size / 24;
-    local col = u32(color, alpha or 1);
-    local thickness = math.max(1, 2 * k);
-    local function p(px, py)
-        return { cx + (px - 12) * k, cy + (py - 12) * k };
-    end
-    dl:AddLine(p(6, 6), p(18, 18), col, thickness);
-    dl:AddLine(p(18, 6), p(6, 18), col, thickness);
-end
-
-local function ghost(id, x, cy, label, sc)
-    local font, px = font_text(), math.floor(14.5 * sc + 0.5);
-    local w, h = measure(label, px, font) + math.floor(22 * sc + 0.5), math.floor(24 * sc + 0.5);
+-- A ghost button: the text + 22 wide, 24 tall. Returns clicked.
+local function button(id, x, cy, label)
+    local px = S(SMALL + 0.5);
+    local w, h = measure(label, px, fonts.text) + S(22), S(24);
     local y = cy - h / 2;
     local hovered, clicked, active = hit(id, x, y, w, h);
     local dl = imgui.GetWindowDrawList();
     local t = ease(id, hovered and 1 or 0, 22);
-    local r = math.floor(4 * sc + 0.5);
-    fill(dl, x, y, w, h, mix(P.well, P.hover, t), r, 1);
-    dl:AddRect({ x, y }, { x + w, y + h }, u32(mix(P.well_edge, P.accent_lo, t), 1), r);
-    if active then fill(dl, x, y, w, h, '#000000', r, 0.15); end
-    text_centred(dl, x + w / 2, cy, label, mix(P.text2, P.text, t), font, px);
-    return clicked == true;
+    fill(dl, x, y, w, h, mix(P.well, P.hover, t), S(4));
+    dl:AddRect({ x, y }, { x + w, y + h }, u32(mix(P.well_edge, P.accent_lo, t)), S(4));
+    if active then fill(dl, x, y, w, h, '#000000', S(4), 0.15); end
+    text_centred(dl, x + w / 2, cy, label, mix(P.text2, P.text, t), fonts.text, px);
+    return clicked;
+end
+
+-- Sidekick3's close mark: an X, `box` square, the cross 0.72 of it, dim
+-- until the pointer is on it, then rose. Returns clicked, hovered.
+local function close_mark(id, cx, cy, box)
+    local hovered, clicked = hit(id, cx - box / 2, cy - box / 2, box, box);
+    local k = box * 0.72 / 24;
+    local col = u32(hovered and P.rose or P.dim);
+    local thickness = math.max(1, 2 * k);
+    local function p(px, py) return { cx + (px - 12) * k, cy + (py - 12) * k }; end
+    local dl = imgui.GetWindowDrawList();
+    dl:AddLine(p(6, 6), p(18, 18), col, thickness);
+    dl:AddLine(p(18, 6), p(6, 18), col, thickness);
+    return clicked, hovered;
+end
+
+--[[ pg: where the rows go, top to bottom: { dl, x, w, y (the next row's top),
+     lx (where labels start), right (where controls end) }. ]]--
+
+-- A group's heading: Sidekick3's small capitals in teal, a line after.
+local function subheader(pg, s)
+    pg.y = pg.y + S(8);
+    local cy = pg.y + S(12);
+    local tw = text_spaced(pg.dl, pg.lx, cy, s:upper(), P.teal, fonts.semi_italic, S(SMALL), math.max(1, S(1.2)));
+    local tx = pg.lx + tw + S(10);
+    if pg.right > tx then pg.dl:AddLine({ tx, cy }, { pg.right, cy }, u32(P.teal, 0.35), 1); end
+    pg.y = pg.y + S(26);
+end
+
+-- A line `h` tall (a row unless given): the band under the mouse, `label`
+-- at the left, `help` over the label's half. Returns its middle.
+local function line(pg, label, help, h)
+    h = h or S(ROW_H);
+    local y = pg.y;
+    pg.y = y + h;
+    if over(pg.x + S(4), y, pg.w - S(8), h) then
+        fill(pg.dl, pg.x + S(4), y, pg.w - S(8), h, P.hover, S(3), 0.8);
+    end
+    local cy = y + math.min(h, S(ROW_H)) / 2;
+    if label then text_mid(pg.dl, pg.lx, cy, label, P.text, fonts.text, S(BODY)); end
+    if help and over(pg.x, y, pg.w / 2, h) then tooltip(help); end
+    return cy;
+end
+
+-- A line of text in a 22px line.
+local function note(pg, s, color)
+    text_mid(pg.dl, pg.lx, pg.y + S(11), s, color or P.dim, fonts.text, S(SMALL + 0.5));
+    pg.y = pg.y + S(22);
+end
+
+local TOGGLES = {
+    { 'Name', '##tb_name', 'show_name', 'The name above the bar.' },
+    { 'HP %', '##tb_hp', 'show_hp', 'The percent on the bar.' },
+    { 'Detection', '##tb_detect', 'show_detection', 'Aggro and Link on the left of the bar. Senses on the right.' },
+    { 'Weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
+    { 'Resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
+};
+
+-- The page from the top: the title bar and its line, 10 more, each group's
+-- heading (8 above, 26 for it) and rows, the button's row (a row and 4),
+-- the note (22), and 14 under it. draw_config lays it out in this order.
+local function page_height()
+    return S(TITLE_H) + 1 + S(10)
+        + 2 * (S(8) + S(26)) + (#TOGGLES + 3) * S(ROW_H)
+        + S(ROW_H) + S(4) + S(22) + S(14);
 end
 
 local function draw_config(has_target)
     tick();
-    local sc = panel_scale();
-    local function S(n) return math.floor(n * sc + 0.5); end
-    local font = font_text();
-    local toggles = {
-        { 'Show name', '##tb_name', 'show_name', 'The name above the bar.' },
-        { 'Show HP%', '##tb_hp', 'show_hp', 'The percent on the bar.' },
-        { 'Show detection', '##tb_detect', 'show_detection', 'Aggro and link on the left of the bar. Senses on the right.' },
-        { 'Show weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
-        { 'Show resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
-    };
-    local _, ymax = screen();
-    ymax = math.max(0, math.floor(ymax - cfg.height));
-    local sliders = {
-        { 'Width', '##tb_w', 'width', cfg.width, WIDTH_MIN, WIDTH_MAX, 'Pixels.' },
-        { 'Height', '##tb_h', 'height', cfg.height, HEIGHT_MIN, HEIGHT_MAX, 'Pixels.' },
-        { 'Y', '##tb_y', 'y', math.min(cfg.y, ymax), 0, ymax, 'Pixels from the top of the screen.' },
-    };
-    local rows_n = #toggles + #sliders;
-    local pw = S(PAGE_W);
-    local ph = S(TITLE_H) + rows_n * S(ROW_H)
-        + S(BODY_GAP) + S(BODY_BTN) + S(BODY_GAP) + S(BODY_HINT) + S(BODY_BOTTOM);
-    local m = S(MARGIN);
     local sw, sh = screen();
+    local _, bar_y, _, bar_h = bar_rect();
+    local wmax = math.max(WIDTH_MIN, math.min(WIDTH_MAX, math.floor(sw)));
+    local ymax = math.max(Y_MIN, math.floor(sh - bar_h));
+    local sliders = {
+        { 'Width', '##tb_w', 'width', math.min(cfg.width, wmax), WIDTH_MIN, wmax, 'Pixels, up to the screen\'s width.' },
+        { 'Height', '##tb_h', 'height', cfg.height, HEIGHT_MIN, HEIGHT_MAX, 'Pixels.' },
+        { 'Y', '##tb_y', 'y', bar_y, Y_MIN, ymax, 'Pixels from the top of the screen to the bar.' },
+    };
+    local pw, ph, m = S(PAGE_W), page_height(), S(MARGIN);
     imgui.SetNextWindowPos({ sw / 2, sh / 2 }, ImGuiCond_FirstUseEver, { 0.5, 0.5 });
     imgui.SetNextWindowSize({ pw + m * 2, ph + m * 2 }, ImGuiCond_Always);
-    imgui.PushStyleColor(ImGuiCol_WindowBg, { 0, 0, 0, 0 });
     imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { 0, 0 });
     config_state[1] = true;
-    local shown = imgui.Begin('TargetBar###tb_settings', config_state, PANEL_FLAGS);
     local drew, fault = true, nil;
-    if shown then
+    if imgui.Begin('TargetBar###tb_settings', config_state, PANEL_FLAGS) then
         drew, fault = pcall(function ()
             local wx, wy = xy(imgui.GetCursorScreenPos());
             local x, y = wx + m, wy + m;
             local dl = imgui.GetWindowDrawList();
             fill(dl, x - 1, y, pw + 2, ph + 2, '#000000', S(6), 0.35);
-            fill(dl, x, y, pw, ph, P.bg, S(5), 1);
-            dl:AddRect({ x, y }, { x + pw, y + ph }, u32(P.border, 1), S(5));
+            fill(dl, x, y, pw, ph, P.bg, S(5));
+            dl:AddRect({ x, y }, { x + pw, y + ph }, u32(P.border), S(5));
 
             local title_cy = y + S(TITLE_H) / 2;
-            local head_pad = S(HEAD_PAD);
-            text_mid(dl, x + head_pad, title_cy, 'TargetBar', P.white, font_now(), S(TITLE_PX));
-            local box = S(CLOSE_BOX);
-            local cx = x + pw - head_pad - box / 2;
-            local chov, cclick = hit('##tb_close', cx - box / 2, title_cy - box / 2, box, box);
-            local close_t = ease('tb_close', chov and 1 or 0, 22);
-            cross(dl, cx, title_cy, S(CLOSE_PX), mix(P.dim, P.rose, close_t), 1);
-            if chov then tooltip('Close'); end
-            if cclick then config_open = false; end
-            dl:AddLine({ x, y + S(TITLE_H) }, { x + pw, y + S(TITLE_H) }, u32(P.border, 1), 1);
+            text_mid(dl, x + S(LEFT), title_cy, 'TargetBar', P.white, fonts.semi, S(BODY));
+            local box = S(21);
+            local closed, close_hov = close_mark('##tb_close', x + pw - S(PAD) - box / 2, title_cy, box);
+            if close_hov then tooltip('Close'); end
+            if closed then config_open = false; end
+            dl:AddLine({ x, y + S(TITLE_H) }, { x + pw, y + S(TITLE_H) }, u32(P.border), 1);
 
-            local _, _, dactive = hit('##tb_title_drag', x, y, math.max(1, cx - box / 2 - x), S(TITLE_H));
-            if imgui.IsItemActivated() then panel_drag = { xy(imgui.GetWindowPos()) }; end
-            if dactive and panel_drag ~= nil then
-                local dx, dy = xy(imgui.GetMouseDragDelta(0));
-                imgui.SetWindowPos({ panel_drag[1] + dx, panel_drag[2] + dy });
+            local pg = {
+                dl = dl, x = x, w = pw, y = y + S(TITLE_H) + 1 + S(10),
+                lx = x + S(LEFT), right = x + pw - S(PAD),
+            };
+            subheader(pg, 'Show');
+            for _, item in ipairs(TOGGLES) do
+                local cy = line(pg, item[1], item[4]);
+                local on, flipped = switch(item[2], pg.right - S(SW_W), cy, cfg[item[3]] == true);
+                if imgui.IsItemHovered() then tooltip(item[4]); end
+                if flipped then cfg[item[3]] = on; dirty = true; end
             end
-
-            local row_h = S(ROW_H);
-            local lx, right = x + S(LEFT), x + pw - S(PAD);
-            local n = 0;
-            local function row_band()
-                local top = y + S(TITLE_H) + n * row_h;
-                n = n + 1;
-                if over(x + S(4), top, pw - S(8), row_h) then
-                    fill(dl, x + S(4), top, pw - S(8), row_h, P.hover, S(3), 0.8);
-                end
-                return top, top + row_h / 2;
-            end
-            for _, item in ipairs(toggles) do
-                local top, cy = row_band();
-                text_mid(dl, lx, cy, item[1], P.text, font, S(16));
-                if over(x, top, pw / 2, row_h) then tooltip(item[4]); end
-                local on, changed = switch(item[2], right - S(32), cy, cfg[item[3]] == true);
-                if changed then cfg[item[3]] = on; dirty = true; end
-            end
+            subheader(pg, 'Bar');
             for _, row in ipairs(sliders) do
-                local top, cy = row_band();
-                text_mid(dl, lx, cy, row[1], P.text, font, S(16));
-                if over(x, top, pw / 2, row_h) then tooltip(row[7]); end
-                local v, moved = slider(row[2], right - S(SLIDER_W), cy, row[4], row[5], row[6], 'px', sc);
+                local cy = line(pg, row[1], row[7]);
+                local v, moved = slider(row[2], pg.right - S(SLIDER_W), cy, S(SLIDER_W), row[4], row[5], row[6], 'px');
                 if moved and v ~= cfg[row[3]] then cfg[row[3]] = v; dirty = true; end
             end
 
-            local button_cy = y + S(TITLE_H) + n * row_h + S(BODY_GAP) + S(BODY_BTN) / 2;
-            if ghost('##tb_reset', lx, button_cy, 'Reset position', sc) then
-                if cfg.y ~= DEFAULT_Y then
-                    cfg.y = DEFAULT_Y;
+            local by = line(pg, nil, nil, S(ROW_H) + S(4));
+            if button('##tb_reset', pg.lx, by, 'Reset position') then
+                if cfg.y ~= nil then
+                    cfg.y = nil;
                     dirty = true;
                 end
             end
-            local hint_cy = button_cy + S(BODY_BTN) / 2 + S(BODY_GAP) + S(BODY_HINT) / 2;
-            local hint = has_target
-                and 'Drag the bar up or down. It stays centered.'
-                or 'No target: a preview is shown so you can place it.';
-            text_mid(dl, lx, hint_cy, hint, P.faint, font, S(13.5));
+            if imgui.IsItemHovered() then tooltip('Back to the middle of the screen.'); end
+            note(pg, has_target and 'Drag the bar up or down. It stays centered.'
+                or 'No target: a preview shows where it goes.', P.faint);
         end);
     end
     imgui.End();
     imgui.PopStyleVar(3);
-    imgui.PopStyleColor(1);
     if drew then
         panel_fault = nil;
     elseif fault ~= panel_fault then
@@ -1097,7 +1132,6 @@ local function draw_config(has_target)
         say('Settings window: ' .. tostring(fault));
     end
     if config_state[1] == false then config_open = false; end
-    if not imgui.IsMouseDown(0) then panel_drag = nil; end
 end
 
 local function save_if_idle()
@@ -1108,7 +1142,8 @@ end
 
 local function report()
     sanitize();
-    say(('Width %d, height %d, Y %d.'):format(cfg.width, cfg.height, cfg.y));
+    local _, y = bar_rect();
+    say(('Width %d, height %d, Y %d%s.'):format(cfg.width, cfg.height, y, cfg.y == nil and ' (centered)' or ''));
 end
 
 local function set_number(key, raw, lo, hi)
@@ -1129,7 +1164,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     load_zone(current_zone());
 
     local target = read_target();
-    local hpp, id = nil, nil;
+    local hpp, id;
     if target ~= nil then
         hpp, id = target.hpp, target.id;
     elseif config_open then
@@ -1144,31 +1179,18 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     local dl = imgui.GetBackgroundDrawList();
     draw_bar(dl, x, y, w, h, hpp, smooth(id, hpp));
     if cfg.show_name then
-        if target ~= nil then
-            draw_name(dl, x, y, w, target.name);
-        elseif config_open then
-            draw_name(dl, x, y, w, 'Target');
-        end
+        draw_name(dl, x, y, w, target ~= nil and target.name or 'Target');
     end
     local res = nil;
-    if target ~= nil and target.mob then
+    if target == nil then
+        res = PREVIEW_MOB;
+    elseif target.mob then
         res = find_mob(target.index, target.name);
     end
-    local marks = nil;
     if res ~= nil then
-        marks = resist_line(res);
-    elseif target == nil then
-        marks = preview_resists;
-    end
-    draw_resists(dl, x, y, w, h, shown_marks(marks));
-    if cfg.show_detection then
-        local left, right = nil, nil;
-        if res ~= nil then
-            left, right = threat(res), senses(res);
-        elseif target == nil then
-            left, right = threat(PREVIEW_MOB), senses(PREVIEW_MOB);
-        end
-        draw_flanks(dl, x, y, w, h, left, right);
+        local rows = rows_of(res);
+        draw_resists(dl, x, y, w, h, shown_marks(rows.marks));
+        if cfg.show_detection then draw_flanks(dl, x, y, w, h, rows.left, rows.right); end
     end
     if config_open then
         drag_y(x, y, w, h);
@@ -1193,7 +1215,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
         say(config_open and 'Settings open. /tb closes them.' or 'Settings closed.');
         report();
     elseif sub == 'help' then
-        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns width, height, and Y.');
+        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns width and height, and centers the bar.');
     elseif sub == 'width' then
         set_number('width', args[3], WIDTH_MIN, WIDTH_MAX);
     elseif sub == 'height' then
@@ -1201,7 +1223,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
     elseif sub == 'y' then
         set_number('y', args[3], Y_MIN, Y_MAX);
     elseif sub == 'reset' then
-        cfg.width, cfg.height, cfg.y = DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_Y;
+        cfg.width, cfg.height, cfg.y = DEFAULT_WIDTH, DEFAULT_HEIGHT, nil;
         settings.save();
         dirty = false;
         say('Reset.');
@@ -1212,5 +1234,5 @@ ashita.events.register('command', 'targetbar_command', function (e)
 end);
 
 ashita.events.register('unload', 'targetbar_unload', function ()
-    pcall(function () settings.save(); end);
+    if dirty then pcall(function () settings.save(); end); end
 end);
