@@ -572,7 +572,10 @@ end
 
 -- The settings window follows the Vanacore look Sidekick Settings uses:
 -- one palette, Segoe UI, and every control drawn on the window's list.
--- Sizes below are the unscaled pixels of that window's page (ui/window.lua).
+-- Row sizes below are the unscaled pixels of that window's page (ui/window.lua).
+-- The title bar matches Choco: 36 tall, the name in semibold at 19, and a
+-- 12px close cross in a 22px box. Both sit 16 in from the plate. The cross
+-- eases from dim to rose while the pointer is on it.
 local P = {
     bg = '#161822', border = '#2A2E3E', hover = '#1F2334',
     well = '#0E1017', well_edge = '#272B3C', popup = '#0F1118',
@@ -580,8 +583,9 @@ local P = {
     accent = '#7AA2F7', accent2 = '#A9C1FF', accent_lo = '#3E5CB3',
     rose = '#EE6F78', knob = '#F2F3F8', off = '#2B2F42', ink = '#0B1020',
 };
-local PAGE_W, MARGIN, TITLE_H, ROW_H = 390, 6, 44, 30;
+local PAGE_W, MARGIN, TITLE_H, ROW_H = 390, 6, 36, 30;
 local LEFT, PAD, SLIDER_W = 24, 18, 180;
+local HEAD_PAD, TITLE_PX, CLOSE_BOX, CLOSE_PX = 16, 19, 22, 12;
 
 local panel_anim, panel_at, panel_dt = {}, nil, 0;
 local panel_drag = nil;
@@ -833,6 +837,18 @@ local function slider(id, x, cy, value, min, max, unit, sc)
     return value, changed;
 end
 
+-- Choco's close mark: a 24-unit cross, `size` across, centred on (cx, cy).
+local function cross(dl, cx, cy, size, color, alpha)
+    local k = size / 24;
+    local col = u32(color, alpha or 1);
+    local thickness = math.max(1, 2 * k);
+    local function p(px, py)
+        return { cx + (px - 12) * k, cy + (py - 12) * k };
+    end
+    dl:AddLine(p(6, 6), p(18, 18), col, thickness);
+    dl:AddLine(p(18, 6), p(6, 18), col, thickness);
+end
+
 local function ghost(id, x, cy, label, sc)
     local font, px = font_text(), math.floor(14 * sc + 0.5);
     local w, h = measure(label, px, font) + math.floor(22 * sc + 0.5), math.floor(24 * sc + 0.5);
@@ -888,15 +904,13 @@ local function draw_config(has_target)
             dl:AddRect({ x, y }, { x + pw, y + ph }, u32(P.border, 1), S(5));
 
             local title_cy = y + S(TITLE_H) / 2;
-            text_mid(dl, x + S(LEFT), title_cy, 'TargetBar', P.white, font_now(), S(16));
-            local box = S(21);
-            local cx = x + pw - S(PAD) - box / 2;
+            local head_pad = S(HEAD_PAD);
+            text_mid(dl, x + head_pad, title_cy, 'TargetBar', P.white, font_now(), S(TITLE_PX));
+            local box = S(CLOSE_BOX);
+            local cx = x + pw - head_pad - box / 2;
             local chov, cclick = hit('##tb_close', cx - box / 2, title_cy - box / 2, box, box);
-            local arm = box * 0.32;
-            local thick = math.max(1, box * 0.08);
-            local mark = u32(chov and P.rose or P.dim, 1);
-            dl:AddLine({ cx - arm, title_cy - arm }, { cx + arm, title_cy + arm }, mark, thick);
-            dl:AddLine({ cx + arm, title_cy - arm }, { cx - arm, title_cy + arm }, mark, thick);
+            local close_t = ease('tb_close', chov and 1 or 0, 22);
+            cross(dl, cx, title_cy, S(CLOSE_PX), mix(P.dim, P.rose, close_t), 1);
             if chov then tooltip('Close'); end
             if cclick then config_open = false; end
             dl:AddLine({ x, y + S(TITLE_H) }, { x + pw, y + S(TITLE_H) }, u32(P.border, 1), 1);
