@@ -12,9 +12,12 @@ the cursor crosses the middle of the screen.
 The target's name is centered above the bar. Under it, a mob's damage
 weakness and resistance: mobdb's icons, strongest first, one percentage
 on the last icon of each equal group. That row is how Floaties draws it
-(lib/mobinfo.lua M.resist, drawn under the panel). The settings window
-can hide the name, the percent on the bar, the weakness icons, and the
-resistance icons. The bar itself stays.
+(lib/mobinfo.lua M.resist, drawn under the panel). Beside the bar, the
+same source's detection (M.threat, M.senses): aggro or passive, then
+Link, on the left, and TrueSight, Sight, Sound, Scent, Magic, JA, Blood
+on the right. The settings window can hide the name, the percent on the
+bar, the detection icons, the weakness icons, and the resistance icons.
+The bar itself stays.
 
 Text is Sidekick3's HUD face (ui/kit.lua): Segoe UI Semibold, a 1px black
 halo at 85%. The name is name_size and the numbers are text_size, the
@@ -26,7 +29,7 @@ GetTarget():GetTargetIndex(0), then that entity's HP percent.
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.1.1';
+addon.version  = '1.2.0';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -76,6 +79,11 @@ local PHYSICAL = { 'Slashing', 'Piercing', 'H2H', 'Impact' };
 local MAGICAL  = { 'Fire', 'Ice', 'Wind', 'Earth', 'Lightning', 'Water', 'Light', 'Dark' };
 local SHORT    = { Slashing = 'Slash', Piercing = 'Pierce', Impact = 'Blunt' };
 
+-- What the mob notices you with, in the order it is worth reading.
+-- TrueSight leads Sight because it supersedes it. Link is not a sense:
+-- it sits with aggro (see threat). Same list as Floaties' SENSES.
+local SENSES = { 'TrueSight', 'Sight', 'Sound', 'Scent', 'Magic', 'JA', 'Blood' };
+
 -- 1.92 names the flag one way, 1.81 another. Nil rounds every corner.
 local LEFT_CORNERS = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left;
 
@@ -85,6 +93,7 @@ local defaults = T{
     y      = DEFAULT_Y,
     show_name = true,
     show_hp = true,
+    show_detection = true,
     show_weakness = true,
     show_resistance = true,
 };
@@ -170,6 +179,7 @@ local function sanitize()
     cfg.y      = clamp(cfg.y, Y_MIN, Y_MAX, DEFAULT_Y);
     cfg.show_name = shown(cfg.show_name);
     cfg.show_hp = shown(cfg.show_hp);
+    cfg.show_detection = shown(cfg.show_detection);
     cfg.show_weakness = shown(cfg.show_weakness);
     cfg.show_resistance = shown(cfg.show_resistance);
 end
@@ -421,9 +431,51 @@ local function resist_line(res)
     return mods;
 end
 
+-- Aggro or passive, then Link. Aggro/passive always draws: a mob that does
+-- not aggro is a different fact from a mob with no detection data. Notorious
+-- has no icon of its own. It is the gold frame on the aggro/passive glyph.
+-- The text fallback spells the frame out, since there is nothing to see.
+local function threat(res)
+    if res == nil then return nil; end
+    local mood = res.Aggro and 'Aggro' or 'Passive';
+    local out = {
+        {
+            icon = mood .. (res.Notorious and 'HQ' or 'NQ'),
+            alt  = (res.Notorious and 'NM ' or '') .. mood,
+        },
+    };
+    if res.Link == true then
+        out[#out + 1] = { icon = 'Link', alt = 'Link' };
+    end
+    return out;
+end
+
+-- One icon per sense the mob actually has. Empty is a real answer (it
+-- notices nothing that way), not a missing mobdb row.
+local function senses(res)
+    if res == nil then return nil; end
+    local out = {};
+    for _, flag in ipairs(SENSES) do
+        if res[flag] == true then
+            out[#out + 1] = { icon = flag, alt = flag };
+        end
+    end
+    return out;
+end
+
 local preview_resists = resist_line({
     Modifiers = { Fire = 1.25, Ice = 0.5 },
 });
+
+-- No target, settings open. Both flanks, so the bar can be placed against
+-- them. A real mob replaces this with its own flags.
+local PREVIEW_MOB = {
+    Aggro = true,
+    Link = true,
+    TrueSight = true,
+    Sight = true,
+    Sound = true,
+};
 
 -- Weakness is a potency above 1. Resistance is below 1. The two never share
 -- a group, so dropping one side leaves the other's percentages in place.
@@ -504,45 +556,69 @@ local function segment_width(seg)
         width = measure(seg.alt, TEXT_PX);
     end
     if seg.text ~= nil then width = width + measure(seg.text, TEXT_PX); end
-    return width, handle;
+    return width;
 end
 
-local function draw_resists(dl, x, y, w, h, segments)
-    if segments == nil then return; end
-    local handles, total = {}, 0;
-    for i, seg in ipairs(segments) do
-        local sw, handle = segment_width(seg);
-        handles[i] = handle;
-        total = total + sw;
-        if i < #segments and seg.group_end then total = total + ICON; end
-    end
-    local cursor = math.floor(x + (w - total) / 2 + 0.5);
-    local row_y = math.floor(y + h + GAP + 0.5);
-    for i, seg in ipairs(segments) do
-        local handle = handles[i];
-        if handle ~= nil then
-            local drawn = pcall(function ()
-                dl:AddImage(handle, { cursor, row_y }, { cursor + ICON, row_y + ICON },
-                    { 0, 0 }, { 1, 1 }, 0xFFFFFFFF);
-            end);
-            if drawn then
-                cursor = cursor + ICON;
-            elseif seg.alt ~= nil then
-                local aw, ah = measure(seg.alt, TEXT_PX);
-                halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
-                cursor = cursor + aw;
-            end
+-- One segment, top-left at (cursor, row_y). A missing texture draws `alt`
+-- in the icon's place, the same fallback the damage row uses. Returns the
+-- x the next segment starts at, before any gap the caller adds.
+local function paint_segment(dl, cursor, row_y, seg)
+    local handle = icon_handle(seg.icon);
+    if handle ~= nil then
+        local drawn = pcall(function ()
+            dl:AddImage(handle, { cursor, row_y }, { cursor + ICON, row_y + ICON },
+                { 0, 0 }, { 1, 1 }, 0xFFFFFFFF);
+        end);
+        if drawn then
+            cursor = cursor + ICON;
         elseif seg.alt ~= nil then
             local aw, ah = measure(seg.alt, TEXT_PX);
             halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
             cursor = cursor + aw;
         end
-        if seg.text ~= nil then
-            local tw, th = measure(seg.text, TEXT_PX);
-            halo(dl, cursor, row_y + (ICON - th) / 2 - lift(th), TEXT_PX, seg.text);
-            cursor = cursor + tw;
-        end
+    elseif seg.alt ~= nil then
+        local aw, ah = measure(seg.alt, TEXT_PX);
+        halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
+        cursor = cursor + aw;
+    end
+    if seg.text ~= nil then
+        local tw, th = measure(seg.text, TEXT_PX);
+        halo(dl, cursor, row_y + (ICON - th) / 2 - lift(th), TEXT_PX, seg.text);
+        cursor = cursor + tw;
+    end
+    return cursor;
+end
+
+local function draw_resists(dl, x, y, w, h, segments)
+    if segments == nil then return; end
+    local total = 0;
+    for i, seg in ipairs(segments) do
+        total = total + segment_width(seg);
+        if i < #segments and seg.group_end then total = total + ICON; end
+    end
+    local cursor = math.floor(x + (w - total) / 2 + 0.5);
+    local row_y = math.floor(y + h + GAP + 0.5);
+    for i, seg in ipairs(segments) do
+        cursor = paint_segment(dl, cursor, row_y, seg);
         if i < #segments and seg.group_end then cursor = cursor + ICON; end
+    end
+end
+
+-- Detection, centered on the bar's height. The left group grows left from
+-- one gap off the bar, the right group grows right. Icons in a group sit
+-- flush: Floaties' own gap is 0, and the PNGs carry their own padding.
+-- Neither group changes the bar's width or its place on the screen.
+local function draw_flanks(dl, x, y, w, h, left, right)
+    local row_y = math.floor(y + (h - ICON) / 2 + 0.5);
+    if left ~= nil and #left > 0 then
+        local width = 0;
+        for i = 1, #left do width = width + segment_width(left[i]); end
+        local cursor = math.floor(x - GAP - width + 0.5);
+        for i = 1, #left do cursor = paint_segment(dl, cursor, row_y, left[i]); end
+    end
+    if right ~= nil and #right > 0 then
+        local cursor = math.floor(x + w + GAP + 0.5);
+        for i = 1, #right do cursor = paint_segment(dl, cursor, row_y, right[i]); end
     end
 end
 
@@ -917,6 +993,7 @@ local function draw_config(has_target)
     local toggles = {
         { 'Show name', '##tb_name', 'show_name', 'The name above the bar.' },
         { 'Show HP%', '##tb_hp', 'show_hp', 'The percent on the bar.' },
+        { 'Show detection', '##tb_detect', 'show_detection', 'Aggro and link on the left of the bar. Senses on the right.' },
         { 'Show weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
         { 'Show resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
     };
@@ -1073,13 +1150,26 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
             draw_name(dl, x, y, w, 'Target');
         end
     end
-    local marks = nil;
+    local res = nil;
     if target ~= nil and target.mob then
-        marks = resist_line(find_mob(target.index, target.name));
+        res = find_mob(target.index, target.name);
+    end
+    local marks = nil;
+    if res ~= nil then
+        marks = resist_line(res);
     elseif target == nil then
         marks = preview_resists;
     end
     draw_resists(dl, x, y, w, h, shown_marks(marks));
+    if cfg.show_detection then
+        local left, right = nil, nil;
+        if res ~= nil then
+            left, right = threat(res), senses(res);
+        elseif target == nil then
+            left, right = threat(PREVIEW_MOB), senses(PREVIEW_MOB);
+        end
+        draw_flanks(dl, x, y, w, h, left, right);
+    end
     if config_open then
         drag_y(x, y, w, h);
         draw_config(target ~= nil);
@@ -1103,7 +1193,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
         say(config_open and 'Settings open. /tb closes them.' or 'Settings closed.');
         report();
     elseif sub == 'help' then
-        say('/tb opens settings. Toggles hide the name, the HP%, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns width, height, and Y.');
+        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns width, height, and Y.');
     elseif sub == 'width' then
         set_number('width', args[3], WIDTH_MIN, WIDTH_MAX);
     elseif sub == 'height' then
