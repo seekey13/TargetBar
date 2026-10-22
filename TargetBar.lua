@@ -12,7 +12,9 @@ the cursor crosses the middle of the screen.
 The target's name is centered above the bar. Under it, a mob's damage
 weakness and resistance: mobdb's icons, strongest first, one percentage
 on the last icon of each equal group. That row is how Floaties draws it
-(lib/mobinfo.lua M.resist, drawn under the panel).
+(lib/mobinfo.lua M.resist, drawn under the panel). The settings window
+can hide the name, the percent on the bar, the weakness icons, and the
+resistance icons. The bar itself stays.
 
 Text is Sidekick3's HUD face (ui/kit.lua): Segoe UI Semibold, a 1px black
 halo at 85%. The name is name_size and the numbers are text_size, the
@@ -81,6 +83,10 @@ local defaults = T{
     width  = DEFAULT_WIDTH,
     height = DEFAULT_HEIGHT,
     y      = DEFAULT_Y,
+    show_name = true,
+    show_hp = true,
+    show_weakness = true,
+    show_resistance = true,
 };
 
 local cfg = settings.load(defaults);
@@ -152,10 +158,20 @@ local function clamp(v, lo, hi, fallback)
     return v;
 end
 
+-- A missing flag stays on, so an older settings file keeps the current look.
+local function shown(value)
+    if value == nil then return true; end
+    return value == true;
+end
+
 local function sanitize()
     cfg.width  = clamp(cfg.width, WIDTH_MIN, WIDTH_MAX, DEFAULT_WIDTH);
     cfg.height = clamp(cfg.height, HEIGHT_MIN, HEIGHT_MAX, DEFAULT_HEIGHT);
     cfg.y      = clamp(cfg.y, Y_MIN, Y_MAX, DEFAULT_Y);
+    cfg.show_name = shown(cfg.show_name);
+    cfg.show_hp = shown(cfg.show_hp);
+    cfg.show_weakness = shown(cfg.show_weakness);
+    cfg.show_resistance = shown(cfg.show_resistance);
 end
 
 sanitize();
@@ -409,6 +425,24 @@ local preview_resists = resist_line({
     Modifiers = { Fire = 1.25, Ice = 0.5 },
 });
 
+-- Weakness is a potency above 1. Resistance is below 1. The two never share
+-- a group, so dropping one side leaves the other's percentages in place.
+local function shown_marks(segments)
+    if segments == nil then return nil; end
+    if cfg.show_weakness and cfg.show_resistance then return segments; end
+    if not cfg.show_weakness and not cfg.show_resistance then return nil; end
+    local keep = {};
+    for i = 1, #segments do
+        local seg = segments[i];
+        local weak = (tonumber(seg.potency) or 1) > 1;
+        if (weak and cfg.show_weakness) or (not weak and cfg.show_resistance) then
+            keep[#keep + 1] = seg;
+        end
+    end
+    if #keep == 0 then return nil; end
+    return keep;
+end
+
 local function load_zone(zone)
     zone = tonumber(zone) or 0;
     if zone == mob_zone then return; end
@@ -525,7 +559,7 @@ local function draw_bar(dl, x, y, w, h, hpp, fill_hpp)
         fill(dl, x, y, fw, h, FILL, math.min(r, fw / 2), BAR_A, partial and LEFT_CORNERS or nil);
     end
     dl:AddRect({ x, y }, { x + w, y + h }, u32(EDGE, BAR_A), r);
-    pcall(draw_label, dl, x, y, w, h, hpp);
+    if cfg.show_hp then pcall(draw_label, dl, x, y, w, h, hpp); end
 end
 
 local function bar_rect()
@@ -570,22 +604,26 @@ local function drag_y(x, y, w, h)
     if not imgui.IsMouseDown(0) then drag_origin = nil; end
 end
 
--- The settings window follows the Vanacore look Sidekick Settings uses:
--- one palette, Segoe UI, and every control drawn on the window's list.
--- Row sizes below are the unscaled pixels of that window's page (ui/window.lua).
+-- The settings window follows the Vanacore look: one palette, Segoe UI,
+-- and every control drawn on the window's list.
 -- The title bar matches Choco: 36 tall, the name in semibold at 19, and a
 -- 12px close cross in a 22px box. Both sit 16 in from the plate. The cross
 -- eases from dim to rose while the pointer is on it.
+-- The body matches XPBar's card. Rows are 27 and start under the rule.
+-- Labels are 16. The switch is 32 by 17. Sliders are 200 wide, value at
+-- 14.5. Then an 8px gap, a 24px button, an 8px gap, a 13.5px hint in a
+-- 16px line, and 14px at the bottom.
 local P = {
     bg = '#161822', border = '#2A2E3E', hover = '#1F2334',
     well = '#0E1017', well_edge = '#272B3C', popup = '#0F1118',
-    white = '#FFFFFF', text = '#E8EAF1', text2 = '#BDC1D0', dim = '#7B8095',
+    white = '#FFFFFF', text = '#E8EAF1', text2 = '#BDC1D0', dim = '#7B8095', faint = '#4E536A',
     accent = '#7AA2F7', accent2 = '#A9C1FF', accent_lo = '#3E5CB3',
     rose = '#EE6F78', knob = '#F2F3F8', off = '#2B2F42', ink = '#0B1020',
 };
-local PAGE_W, MARGIN, TITLE_H, ROW_H = 390, 6, 36, 30;
-local LEFT, PAD, SLIDER_W = 24, 18, 180;
+local PAGE_W, MARGIN, TITLE_H, ROW_H = 360, 6, 36, 27;
+local LEFT, PAD, SLIDER_W = 24, 18, 200;
 local HEAD_PAD, TITLE_PX, CLOSE_BOX, CLOSE_PX = 16, 19, 22, 12;
+local BODY_GAP, BODY_BTN, BODY_HINT, BODY_BOTTOM = 8, 24, 16, 14;
 
 local panel_anim, panel_at, panel_dt = {}, nil, 0;
 local panel_drag = nil;
@@ -674,20 +712,6 @@ end
 local function text_centred(dl, cx, cy, text, color, font, px)
     local w, h = measure(text, px, font);
     plain(dl, cx - w / 2, cy - h / 2 - lift(h), px, color, text, font);
-end
-
-local function wrap(text, font, px, width)
-    local lines, cur = {}, '';
-    for word in tostring(text):gmatch('%S+') do
-        local try = cur == '' and word or (cur .. ' ' .. word);
-        if cur ~= '' and measure(try, px, font) > width then
-            lines[#lines + 1], cur = cur, word;
-        else
-            cur = try;
-        end
-    end
-    if cur ~= '' then lines[#lines + 1] = cur; end
-    return lines;
 end
 
 local function tooltip(s)
@@ -820,7 +844,7 @@ local function slider(id, x, cy, value, min, max, unit, sc)
     local vx = x + track + gap;
     local vhov, vclick = hit(id .. '.v', vx, cy - s(10), value_w, s(20));
     if vhov then fill(dl, vx, cy - s(10), value_w, s(20), P.hover, s(3), 1); end
-    text_right(dl, vx + value_w - s(4), cy, tostring(value) .. (unit or ''), P.text2, font_text(), s(14));
+    text_right(dl, vx + value_w - s(4), cy, tostring(value) .. (unit or ''), P.text2, font_text(), s(14.5));
     if vclick then
         typed[id] = { tostring(value), focus = true };
         imgui.OpenPopup(id .. '.num');
@@ -837,6 +861,27 @@ local function slider(id, x, cy, value, min, max, unit, sc)
     return value, changed;
 end
 
+-- XPBar's switch: 32 by 17, the knob slides, accent while it is on.
+local function switch(id, x, cy, on)
+    local sc = panel_scale();
+    local function s(n) return math.floor(n * sc + 0.5); end
+    local w, h = s(32), s(17);
+    local y = cy - h / 2;
+    local hovered, clicked = hit(id, x, y, w, h);
+    local changed = clicked == true;
+    if changed then on = not on; end
+    local t = ease(id, on and 1 or 0, 18);
+    local dl = imgui.GetWindowDrawList();
+    fill(dl, x, y, w, h, mix(P.off, P.accent, t), h / 2, 1);
+    if hovered then fill(dl, x, y, w, h, '#FFFFFF', h / 2, 0.08); end
+    local inset = s(2);
+    local r = (h - s(4)) / 2;
+    local x0 = x + inset + r;
+    local x1 = x + w - inset - r;
+    dl:AddCircleFilled({ x0 + (x1 - x0) * t, cy }, r, u32(P.knob, 1), 24);
+    return on == true, changed;
+end
+
 -- Choco's close mark: a 24-unit cross, `size` across, centred on (cx, cy).
 local function cross(dl, cx, cy, size, color, alpha)
     local k = size / 24;
@@ -850,7 +895,7 @@ local function cross(dl, cx, cy, size, color, alpha)
 end
 
 local function ghost(id, x, cy, label, sc)
-    local font, px = font_text(), math.floor(14 * sc + 0.5);
+    local font, px = font_text(), math.floor(14.5 * sc + 0.5);
     local w, h = measure(label, px, font) + math.floor(22 * sc + 0.5), math.floor(24 * sc + 0.5);
     local y = cy - h / 2;
     local hovered, clicked, active = hit(id, x, y, w, h);
@@ -868,21 +913,24 @@ local function draw_config(has_target)
     tick();
     local sc = panel_scale();
     local function S(n) return math.floor(n * sc + 0.5); end
-    local font, note_px = font_text(), S(14);
-    local note_w = S(PAGE_W) - S(LEFT) - S(PAD);
-    local notes = {
-        'The bar stays on the horizontal center. Drag it, or set Y, to move it.',
-        'The name sits above the bar. Weakness and resistance sit below it.',
+    local font = font_text();
+    local toggles = {
+        { 'Show name', '##tb_name', 'show_name', 'The name above the bar.' },
+        { 'Show HP%', '##tb_hp', 'show_hp', 'The percent on the bar.' },
+        { 'Show weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
+        { 'Show resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
     };
-    if not has_target then
-        notes[#notes + 1] = 'No target: a full bar and the name "Target" are shown so you can place it.';
-    end
-    local lines = {};
-    for _, s in ipairs(notes) do
-        for _, l in ipairs(wrap(s, font, note_px, note_w)) do lines[#lines + 1] = l; end
-    end
-
-    local pw, ph = S(PAGE_W), S(TITLE_H) + S(8) + 4 * S(ROW_H) + S(8) + #lines * S(22) + S(16);
+    local _, ymax = screen();
+    ymax = math.max(0, math.floor(ymax - cfg.height));
+    local sliders = {
+        { 'Width', '##tb_w', 'width', cfg.width, WIDTH_MIN, WIDTH_MAX, 'Pixels.' },
+        { 'Height', '##tb_h', 'height', cfg.height, HEIGHT_MIN, HEIGHT_MAX, 'Pixels.' },
+        { 'Y', '##tb_y', 'y', math.min(cfg.y, ymax), 0, ymax, 'Pixels from the top of the screen.' },
+    };
+    local rows_n = #toggles + #sliders;
+    local pw = S(PAGE_W);
+    local ph = S(TITLE_H) + rows_n * S(ROW_H)
+        + S(BODY_GAP) + S(BODY_BTN) + S(BODY_GAP) + S(BODY_HINT) + S(BODY_BOTTOM);
     local m = S(MARGIN);
     local sw, sh = screen();
     imgui.SetNextWindowPos({ sw / 2, sh / 2 }, ImGuiCond_FirstUseEver, { 0.5, 0.5 });
@@ -922,38 +970,44 @@ local function draw_config(has_target)
                 imgui.SetWindowPos({ panel_drag[1] + dx, panel_drag[2] + dy });
             end
 
-            local row_y = y + S(TITLE_H) + S(8);
+            local row_h = S(ROW_H);
             local lx, right = x + S(LEFT), x + pw - S(PAD);
-            local _, ymax = screen();
-            ymax = math.max(0, math.floor(ymax - cfg.height));
-            local rows = {
-                { 'Width', '##tb_w', 'width', cfg.width, WIDTH_MIN, WIDTH_MAX, 'Pixels.' },
-                { 'Height', '##tb_h', 'height', cfg.height, HEIGHT_MIN, HEIGHT_MAX, 'Pixels.' },
-                { 'Y', '##tb_y', 'y', math.min(cfg.y, ymax), 0, ymax, 'Pixels from the top of the screen.' },
-            };
-            for _, row in ipairs(rows) do
-                local rh = S(ROW_H);
-                if over(x + S(4), row_y, pw - S(8), rh) then
-                    fill(dl, x + S(4), row_y, pw - S(8), rh, P.hover, S(3), 0.8);
+            local n = 0;
+            local function row_band()
+                local top = y + S(TITLE_H) + n * row_h;
+                n = n + 1;
+                if over(x + S(4), top, pw - S(8), row_h) then
+                    fill(dl, x + S(4), top, pw - S(8), row_h, P.hover, S(3), 0.8);
                 end
-                local cy = row_y + rh / 2;
+                return top, top + row_h / 2;
+            end
+            for _, item in ipairs(toggles) do
+                local top, cy = row_band();
+                text_mid(dl, lx, cy, item[1], P.text, font, S(16));
+                if over(x, top, pw / 2, row_h) then tooltip(item[4]); end
+                local on, changed = switch(item[2], right - S(32), cy, cfg[item[3]] == true);
+                if changed then cfg[item[3]] = on; dirty = true; end
+            end
+            for _, row in ipairs(sliders) do
+                local top, cy = row_band();
                 text_mid(dl, lx, cy, row[1], P.text, font, S(16));
-                if over(x, row_y, pw / 2, rh) then tooltip(row[7]); end
+                if over(x, top, pw / 2, row_h) then tooltip(row[7]); end
                 local v, moved = slider(row[2], right - S(SLIDER_W), cy, row[4], row[5], row[6], 'px', sc);
                 if moved and v ~= cfg[row[3]] then cfg[row[3]] = v; dirty = true; end
-                row_y = row_y + rh;
             end
 
-            row_y = row_y + S(8);
-            if ghost('##tb_reset', lx, row_y + S(ROW_H) / 2, 'Reset', sc) then
-                cfg.width, cfg.height, cfg.y = DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_Y;
-                dirty = true;
+            local button_cy = y + S(TITLE_H) + n * row_h + S(BODY_GAP) + S(BODY_BTN) / 2;
+            if ghost('##tb_reset', lx, button_cy, 'Reset position', sc) then
+                if cfg.y ~= DEFAULT_Y then
+                    cfg.y = DEFAULT_Y;
+                    dirty = true;
+                end
             end
-            row_y = row_y + S(ROW_H) + S(8);
-            for _, l in ipairs(lines) do
-                text_mid(dl, lx, row_y + S(11), l, P.dim, font, note_px);
-                row_y = row_y + S(22);
-            end
+            local hint_cy = button_cy + S(BODY_BTN) / 2 + S(BODY_GAP) + S(BODY_HINT) / 2;
+            local hint = has_target
+                and 'Drag the bar up or down. It stays centered.'
+                or 'No target: a preview is shown so you can place it.';
+            text_mid(dl, lx, hint_cy, hint, P.faint, font, S(13.5));
         end);
     end
     imgui.End();
@@ -1012,15 +1066,20 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     local x, y, w, h = bar_rect();
     local dl = imgui.GetBackgroundDrawList();
     draw_bar(dl, x, y, w, h, hpp, smooth(id, hpp));
-    if target ~= nil then
-        draw_name(dl, x, y, w, target.name);
-        if target.mob then
-            draw_resists(dl, x, y, w, h, resist_line(find_mob(target.index, target.name)));
+    if cfg.show_name then
+        if target ~= nil then
+            draw_name(dl, x, y, w, target.name);
+        elseif config_open then
+            draw_name(dl, x, y, w, 'Target');
         end
-    elseif config_open then
-        draw_name(dl, x, y, w, 'Target');
-        draw_resists(dl, x, y, w, h, preview_resists);
     end
+    local marks = nil;
+    if target ~= nil and target.mob then
+        marks = resist_line(find_mob(target.index, target.name));
+    elseif target == nil then
+        marks = preview_resists;
+    end
+    draw_resists(dl, x, y, w, h, shown_marks(marks));
     if config_open then
         drag_y(x, y, w, h);
         draw_config(target ~= nil);
@@ -1044,7 +1103,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
         say(config_open and 'Settings open. /tb closes them.' or 'Settings closed.');
         report();
     elseif sub == 'help' then
-        say('/tb opens the sliders. /tb width <px>, /tb height <px>, /tb y <px>, /tb reset.');
+        say('/tb opens settings. Toggles hide the name, the HP%, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns width, height, and Y.');
     elseif sub == 'width' then
         set_number('width', args[3], WIDTH_MIN, WIDTH_MAX);
     elseif sub == 'height' then
