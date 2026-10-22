@@ -4,6 +4,10 @@ Ashita v4 addon that draws your target's HP% as a bar anchored to the horizontal
 
 The fill is Sidekick3's Vanacore HP red (`#EE6F78`) at 70%. The track behind it is the near-black Sidekick3 uses while you are fighting (`#0C0C0C`) at 70%, with a 1px edge and 4px corners. The number on the bar is the target's current HP%. The fill eases toward that number.
 
+The target's name is centered above the bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name is 25px and the numbers are 20px, the sizes that HUD is set to. On an older ImGui the same sizes are drawn in ImGui's own font.
+
+Under the bar, a mob shows the damage types it does not take normally. The icons and the order are mobdb's, drawn the way Floaties draws them: weakest damage first (a positive percentage), resistances last, and one percentage on the last icon of each equal group. A target mobdb does not know, or a player, shows the name and the HP% only. The row needs `addons/mobdb`. Without it, the name and the bar still draw.
+
 On a 3440x1440 display the bar starts at 480 by 28, with its top at Y 706, so it sits on the center of the screen. Width, height, and Y are saved per character. X is always the center of the display.
 
 ## Load
@@ -14,7 +18,7 @@ On a 3440x1440 display the bar starts at 480 by 28, with its top at Y 706, so it
 
 ## Place it
 
-`/tb` opens the sliders and, until you target something, a full bar so you can see the size.
+`/tb` opens the sliders and, until you target something, a full bar and the name "Target" so you can see the size.
 
 - Drag the bar up or down. It stays centered.
 - Width, height, and Y are the three sliders. Reset returns the defaults.

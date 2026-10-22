@@ -9,13 +9,22 @@ Sidekick3 tints that track gray while the pointer is over its panel.
 This bar stays on the near-black combat color, so it does not flash when
 the cursor crosses the middle of the screen.
 
+The target's name is centered above the bar. Under it, a mob's damage
+weakness and resistance: mobdb's icons, strongest first, one percentage
+on the last icon of each equal group. That row is how Floaties draws it
+(lib/mobinfo.lua M.resist, drawn under the panel).
+
+Text is Sidekick3's HUD face (ui/kit.lua): Segoe UI Semibold, a 1px black
+halo at 85%. The name is name_size and the numbers are text_size, the
+sizes this HUD is set to.
+
 HP comes from the main target, the same read as HXUI's target bar:
 GetTarget():GetTargetIndex(0), then that entity's HP percent.
 ]]--
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.0.0';
+addon.version  = '1.1.0';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -23,6 +32,10 @@ require('common');
 local chat     = require('chat');
 local imgui    = require('imgui');
 local settings = require('settings');
+
+local ffi_ok, ffi = pcall(require, 'ffi');
+local d3d_ok, d3d = pcall(require, 'd3d8');
+local textures = ffi_ok and d3d_ok;
 
 -- Defaults put a 480x28 bar on the center of a 3440x1440 screen.
 local DEFAULT_WIDTH  = 480;
@@ -39,6 +52,27 @@ local EDGE   = '#0C0C0C';
 local BAR_A  = 0.70;
 local RADIUS = 4;
 local EASE   = 12; -- share of the remaining fill covered per second
+
+-- Sidekick3 ui/kit.lua draws HUD names in Segoe UI Semibold (seguisb.ttf)
+-- and stamps a 1px black halo under the fill. name_size and text_size are
+-- the sizes that HUD is set to (config/addons/Sidekick3/<character>/ui.lua).
+local NAME_PX = 25;
+local TEXT_PX = 20;
+local HALO_A  = 0.85;
+local GAP     = 4;
+local ICON    = 32; -- Floaties' resist row: icon side, and the gap after a group
+
+local AROUND = {
+    { -1, -1 }, { 0, -1 }, { 1, -1 },
+    { -1,  0 },            { 1,  0 },
+    { -1,  1 }, { 0,  1 }, { 1,  1 },
+};
+
+-- Damage types, in the order they are collected. Physical before magical,
+-- matching mobdb's $physmagic; within each, the game's own element order.
+local PHYSICAL = { 'Slashing', 'Piercing', 'H2H', 'Impact' };
+local MAGICAL  = { 'Fire', 'Ice', 'Wind', 'Earth', 'Lightning', 'Water', 'Light', 'Dark' };
+local SHORT    = { Slashing = 'Slash', Piercing = 'Pierce', Impact = 'Blunt' };
 
 -- 1.92 names the flag one way, 1.81 another. Nil rounds every corner.
 local LEFT_CORNERS = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left;
@@ -59,7 +93,18 @@ local drag_state   = { true };
 local shown_hpp   = nil;
 local shown_id    = nil;
 local shown_at    = nil;
-local sized_text  = true;
+
+-- Segoe UI Semibold, once ImGui can take a font at a size (1.92). Until the
+-- face is ready, text is ImGui's own font scaled to the same pixel size.
+local face         = nil;
+local face_custom  = false;
+local face_pending = nil;
+local face_tried   = false;
+local dynamic_font = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200;
+
+local mob_db   = nil;
+local mob_zone = -1;
+local icon_cache = {};
 
 local DRAG_FLAGS = bit.bor(
     ImGuiWindowFlags_NoDecoration,
@@ -140,6 +185,10 @@ local function fill(dl, x, y, w, h, color, radius, alpha, corners)
     end
 end
 
+local function is_mob(flags)
+    return type(flags) == 'number' and bit.band(flags, 0x10) ~= 0;
+end
+
 -- The main target. Index 0 is "no target". HXUI reads this same index and HPPercent.
 local function read_target()
     local ok, found = pcall(function ()
@@ -151,27 +200,33 @@ local function read_target()
         if type(index) ~= 'number' or index <= 0 or index > 2303 then return nil; end
         index = math.floor(index);
 
-        local name, hpp, sid;
+        local name, hpp, sid, mob;
         if type(GetEntity) == 'function' then
             local ent_ok, ent = pcall(GetEntity, index);
             if ent_ok and ent ~= nil then
                 name = ent.Name;
                 hpp  = ent.HPPercent;
                 sid  = ent.ServerId;
+                local flags_ok, flags = pcall(function () return ent.SpawnFlags; end);
+                if flags_ok then mob = is_mob(flags); end
             end
         end
+        local entities = mm:GetEntity();
         if type(name) ~= 'string' or name == '' or hpp == nil then
-            local entities = mm:GetEntity();
             if entities == nil then return nil; end
             name = entities:GetName(index);
             hpp  = entities:GetHPPercent(index);
             sid  = entities:GetServerId(index);
         end
+        if not mob and entities ~= nil and type(entities.GetSpawnFlags) == 'function' then
+            local flags_ok, flags = pcall(function () return entities:GetSpawnFlags(index); end);
+            if flags_ok then mob = is_mob(flags); end
+        end
         if type(name) ~= 'string' or name == '' then return nil; end
         hpp = tonumber(hpp) or 0;
         if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
         if sid == nil or sid == 0 then sid = index; end
-        return { id = sid, hpp = hpp };
+        return { id = sid, hpp = hpp, name = name, index = index, mob = mob == true };
     end);
     if ok then return found; end
     return nil;
@@ -195,40 +250,232 @@ local function smooth(id, hpp)
     return shown_hpp;
 end
 
-local function draw_label(dl, x, y, w, h, hpp)
-    if h < 14 then return; end
-    local font = imgui.GetFont();
-    if font == nil then return; end
-    local label = ('%d%%'):format(math.floor(hpp + 0.5));
+-- Load Segoe UI Semibold the frame before it is drawn, the same handoff
+-- Sidekick3's kit.frame uses: a face added this frame is not in the atlas yet.
+local function font_frame()
+    if face_pending ~= nil then
+        face, face_custom, face_pending = face_pending, true, nil;
+        return;
+    end
+    if face_custom or face_tried or not dynamic_font then return; end
+    face_tried = true;
+    local dir = ((os.getenv and os.getenv('WINDIR')) or 'C:\\Windows') .. '\\Fonts\\';
+    local path = dir .. 'seguisb.ttf';
+    local file = io.open(path, 'rb');
+    if file == nil then return; end
+    file:close();
+    local ok, loaded = pcall(imgui.AddFontFromFileTTF, path, 18);
+    if ok and loaded then face_pending = loaded; end
+end
+
+local function font_now()
+    return face or imgui.GetFont();
+end
+
+local function measure_wh(a, b)
+    if type(a) ~= 'number' then a, b = xy(a); end
+    return a or 0, b or 0;
+end
+
+-- Width and height of `text` at `px`. With the Semibold face, ImGui measures
+-- at that size. Otherwise CalcTextSize is the UI font, scaled by the ratio.
+local function measure(text, px)
+    local font = font_now();
+    if face_custom and font ~= nil then
+        local ok, a, b = pcall(function ()
+            imgui.PushFont(font, px);
+            local w, h = imgui.CalcTextSize(text);
+            imgui.PopFont();
+            return w, h;
+        end);
+        if ok then return measure_wh(a, b); end
+    end
+    local w, h = measure_wh(imgui.CalcTextSize(text));
     local base = imgui.GetFontSize();
     if base == nil or base <= 0 then base = 13; end
-    local px = math.floor(h * 0.62 + 0.5);
-    if px > h - 2 then px = math.floor(h - 2); end
-    if px < 8 then return; end
+    local k = px / base;
+    return w * k, h * k;
+end
 
-    local tw, th = imgui.CalcTextSize(label);
-    if type(tw) ~= 'number' then tw, th = xy(tw); end
-    tw, th = (tw or 0) * (px / base), (th or 0) * (px / base);
-    if tw <= 0 or tw > w - 8 then return; end
+-- Segoe UI's box holds a tall ascent. Centred by the box, the letters sit low.
+local function lift(h)
+    if not face_custom then return 0; end
+    return math.floor(h * 0.06 + 0.5);
+end
 
-    local tx = math.floor(x + (w - tw) / 2 + 0.5);
-    local ty = math.floor(y + (h - th) / 2 - th * 0.06 + 0.5);
-    local shadow, ink = u32('#000000', 0.90), u32('#FFFFFF', 1);
-    local function text_at(ox, oy, col)
-        if sized_text then
-            local ok = pcall(function ()
-                dl:AddText(font, px, { tx + ox, ty + oy }, col, label);
-            end);
-            if ok then return; end
-            sized_text = false;
+-- Sidekick3's halo: the string in black a pixel out each way, then the fill.
+local function halo(dl, x, y, px, text)
+    local font = font_now();
+    if font == nil or text == nil or text == '' then return; end
+    x, y = math.floor(x + 0.5), math.floor(y + 0.5);
+    local dark, ink = u32('#000000', HALO_A), u32('#FFFFFF', 1);
+    local ok = pcall(function ()
+        for _, o in ipairs(AROUND) do
+            dl:AddText(font, px, { x + o[1], y + o[2] }, dark, text);
         end
-        dl:AddText({ tx + ox, ty + oy }, col, label);
+        dl:AddText(font, px, { x, y }, ink, text);
+    end);
+    if ok then return; end
+    dl:AddText({ x, y }, ink, text);
+end
+
+local function draw_name(dl, x, y, w, name)
+    local tw, th = measure(name, NAME_PX);
+    halo(dl, x + (w - tw) / 2, y - GAP - th, NAME_PX, name);
+end
+
+local function draw_label(dl, x, y, w, h, hpp)
+    local label = ('%d%%'):format(math.floor(hpp + 0.5));
+    local tw, th = measure(label, TEXT_PX);
+    local ty = y + (h - th) / 2 - lift(th);
+    halo(dl, x + (w - tw) / 2, ty, TEXT_PX, label);
+end
+
+-- "+25%" / "-12.5%" from a 1.25 / 0.875 multiplier. One decimal, trailing
+-- ".0" dropped: the data is eighths, so 12.5 stays and 25 does not print "25.0".
+local function percent(potency)
+    local delta  = (potency - 1) * 100;
+    local digits = string.format('%.1f', math.abs(delta)):gsub('%.0$', '');
+    return (delta > 0 and '+' or '-') .. digits .. '%';
+end
+
+-- One icon per damage type the mob does not take at 1. Sorted by potency
+-- descending, so a weakness reads before a resistance. Equal potencies keep
+-- collection order. A run of the same potency draws its icons together and
+-- puts the percentage on the last of them.
+local function resist_line(res)
+    if res == nil or res.Modifiers == nil then return nil; end
+    local mods = {};
+    for _, names in ipairs({ PHYSICAL, MAGICAL }) do
+        for _, name in ipairs(names) do
+            local potency = res.Modifiers[name];
+            if potency ~= nil and potency ~= 1 then
+                mods[#mods + 1] = {
+                    icon    = name,
+                    alt     = SHORT[name] or name,
+                    text    = percent(potency),
+                    potency = potency,
+                    rank    = #mods + 1,
+                };
+            end
+        end
     end
-    text_at(-1, 0, shadow);
-    text_at(1, 0, shadow);
-    text_at(0, -1, shadow);
-    text_at(0, 1, shadow);
-    text_at(0, 0, ink);
+    if #mods == 0 then return nil; end
+    table.sort(mods, function (a, b)
+        if a.potency ~= b.potency then return a.potency > b.potency; end
+        return a.rank < b.rank;
+    end);
+    for i = 1, #mods do
+        if i < #mods and mods[i].potency == mods[i + 1].potency then
+            mods[i].text = nil;
+        else
+            mods[i].group_end = true;
+        end
+    end
+    return mods;
+end
+
+local function load_zone(zone)
+    zone = tonumber(zone) or 0;
+    if zone == mob_zone then return; end
+    mob_zone = zone;
+    mob_db = nil;
+    if zone <= 0 then return; end
+    local path = ('%saddons/mobdb/data/%u.lua'):format(AshitaCore:GetInstallPath(), zone);
+    local chunk = loadfile(path);
+    if chunk == nil then return; end
+    local ok, data = pcall(chunk);
+    if not ok or type(data) ~= 'table' then return; end
+    mob_db = { Names = data.Names or {}, Indices = data.Indices or {} };
+end
+
+local function current_zone()
+    local ok, zone = pcall(function ()
+        return AshitaCore:GetMemoryManager():GetParty():GetMemberZone(0);
+    end);
+    if ok then return tonumber(zone) or 0; end
+    return 0;
+end
+
+-- Index first, name second, matching mobdb. The client puts a marker in
+-- front of some names; the key drops everything before the first letter.
+local function find_mob(index, name)
+    if mob_db == nil then return nil; end
+    local by_index = mob_db.Indices[index];
+    if by_index ~= nil then return by_index; end
+    if type(name) ~= 'string' then return nil; end
+    return mob_db.Names[name:match('^[^%a]*(.*)')];
+end
+
+local function icon_handle(name)
+    if not textures or name == nil then return nil; end
+    local hit = icon_cache[name];
+    if hit ~= nil then return hit and hit.id or nil; end
+    local ok, entry = pcall(function ()
+        local out = ffi.new('IDirect3DTexture8*[1]');
+        local path = ('%saddons/mobdb/icons/%s.png'):format(AshitaCore:GetInstallPath(), name);
+        if ffi.C.D3DXCreateTextureFromFileA(d3d.get_device(), path, out) ~= ffi.C.S_OK then
+            return nil;
+        end
+        local tex = d3d.gc_safe_release(ffi.cast('IDirect3DTexture8*', out[0]));
+        return { tex = tex, id = tonumber(ffi.cast('uint32_t', tex)) };
+    end);
+    -- A miss is cached, including a throw: a missing icon or a D3DX this
+    -- build does not export would otherwise be retried for every icon, every frame.
+    if not ok then entry = nil; end
+    icon_cache[name] = entry or false;
+    return entry and entry.id or nil;
+end
+
+local function segment_width(seg)
+    local width = 0;
+    local handle = icon_handle(seg.icon);
+    if handle ~= nil then
+        width = ICON;
+    elseif seg.alt ~= nil then
+        width = measure(seg.alt, TEXT_PX);
+    end
+    if seg.text ~= nil then width = width + measure(seg.text, TEXT_PX); end
+    return width, handle;
+end
+
+local function draw_resists(dl, x, y, w, h, segments)
+    if segments == nil then return; end
+    local handles, total = {}, 0;
+    for i, seg in ipairs(segments) do
+        local sw, handle = segment_width(seg);
+        handles[i] = handle;
+        total = total + sw;
+        if i < #segments and seg.group_end then total = total + ICON; end
+    end
+    local cursor = math.floor(x + (w - total) / 2 + 0.5);
+    local row_y = math.floor(y + h + GAP + 0.5);
+    for i, seg in ipairs(segments) do
+        local handle = handles[i];
+        if handle ~= nil then
+            local drawn = pcall(function ()
+                dl:AddImage(handle, { cursor, row_y }, { cursor + ICON, row_y + ICON },
+                    { 0, 0 }, { 1, 1 }, 0xFFFFFFFF);
+            end);
+            if drawn then
+                cursor = cursor + ICON;
+            elseif seg.alt ~= nil then
+                local aw, ah = measure(seg.alt, TEXT_PX);
+                halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
+                cursor = cursor + aw;
+            end
+        elseif seg.alt ~= nil then
+            local aw, ah = measure(seg.alt, TEXT_PX);
+            halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
+            cursor = cursor + aw;
+        end
+        if seg.text ~= nil then
+            local tw, th = measure(seg.text, TEXT_PX);
+            halo(dl, cursor, row_y + (ICON - th) / 2 - lift(th), TEXT_PX, seg.text);
+            cursor = cursor + tw;
+        end
+        if i < #segments and seg.group_end then cursor = cursor + ICON; end
+    end
 end
 
 -- `hpp` is the number drawn. `fill_hpp` is the eased width.
@@ -317,8 +564,9 @@ local function draw_config(has_target)
             dirty = true;
         end
         imgui.TextUnformatted('The bar stays on the horizontal center. Drag it, or set Y, to move it.');
+        imgui.TextUnformatted('The name sits above the bar. Weakness and resistance sit below it.');
         if not has_target then
-            imgui.TextUnformatted('No target: a full bar is shown so you can place it.');
+            imgui.TextUnformatted('No target: a full bar and the name "Target" are shown so you can place it.');
         end
     end
     imgui.End();
@@ -350,6 +598,9 @@ local function set_number(key, raw, lo, hi)
 end
 
 ashita.events.register('d3d_present', 'targetbar_present', function ()
+    font_frame();
+    load_zone(current_zone());
+
     local target = read_target();
     local hpp, id = nil, nil;
     if target ~= nil then
@@ -365,6 +616,14 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     local x, y, w, h = bar_rect();
     local dl = imgui.GetBackgroundDrawList();
     draw_bar(dl, x, y, w, h, hpp, smooth(id, hpp));
+    if target ~= nil then
+        draw_name(dl, x, y, w, target.name);
+        if target.mob then
+            draw_resists(dl, x, y, w, h, resist_line(find_mob(target.index, target.name)));
+        end
+    elseif config_open then
+        draw_name(dl, x, y, w, 'Target');
+    end
     if config_open then
         drag_y(x, y, w, h);
         draw_config(target ~= nil);
