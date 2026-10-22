@@ -4,7 +4,9 @@ Ashita v4 addon that draws your target's HP% as a bar anchored to the horizontal
 
 The fill is Sidekick3's Vanacore HP red (`#EE6F78`) at 70%. The track behind it is the near-black Sidekick3 uses while you are fighting (`#0C0C0C`) at 70%, with a 1px edge and 4px corners. The number on the bar is the target's current HP%. The fill eases toward that number.
 
-The target's name is centered above the bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name is 25px and the numbers are 20px, the sizes that HUD is set to. On an older ImGui the same sizes are drawn in ImGui's own font.
+The bar is for mobs and players. Targeting an NPC (a shopkeeper, a door, a Home Point) draws nothing, the rule Floaties uses for its target panel.
+
+The target's name is centered above the bar. It is white over 75% HP, yellow at 75%, orange at 50%, and red at 25%, the colors Sidekick3 gives a name on an HP bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name starts at 25px, the numbers at 20px, and the icons at 32px. Each has a slider. On an older ImGui the same sizes are drawn in ImGui's own font.
 
 Under the bar, a mob shows the damage types it does not take normally. The icons and the order are mobdb's, drawn the way Floaties draws them: weakest damage first (a positive percentage), resistances last, and one percentage on the last icon of each equal group.
 
@@ -28,6 +30,7 @@ The bar starts at 480 by 28, centered on the screen both ways, whatever its size
 
 - Drag the bar up or down. It stays centered.
 - Under Show, Name, HP %, Detection, Weakness, and Resistance each hide that part.
+- Under Text and icons, Name font size and Text font size set the name and the numbers (Sidekick3's ranges, 8 to 64 and 8 to 48 px). Icon size sets the detection and damage icons, 8 to 64 px.
 - Under Bar, Width, Height, and Y are the sliders. Width goes up to the screen's width. Reset position puts the bar back on the middle of the screen.
 - `/tb` again closes the window. The bar hides when you have no target.
 
@@ -39,6 +42,12 @@ The bar starts at 480 by 28, centered on the screen both ways, whatever its size
 /tb help
 ```
 
-`/targetbar` is the same command. Width is 40 to 5120 px (drawn no wider than the screen), height is 8 to 160 px, and Y is pixels from the top of the screen. `/tb reset` returns width and height and centers the bar. The Reset position button centers it only. The toggles are kept.
+`/targetbar` is the same command. Width is 40 to 5120 px (drawn no wider than the screen), height is 8 to 160 px, and Y is pixels from the top of the screen. `/tb reset` returns the width, the height, and the three text and icon sizes, and centers the bar. The Reset position button centers it only. The toggles are kept.
 
 The bar reads the main target (target index 0), the same HP percent HXUI's target bar reads. It does not follow a subtarget.
+
+## Licence
+
+TargetBar is free software under the GNU General Public License, version 3 or (at your option) any later version: see [LICENSE](LICENSE). Copyright (c) 2026 Seekey.
+
+Its settings window is based on Sidekick3's UI kit (`ui/kit.lua`) and Sidekick Settings' layout (`ui/window.lua`), which are based on VanaCore's `/vana` window (`addons/vanacore/vana/draw.lua` and `vana.lua`, Copyright (C) 2026 Vekien, GPL-3.0-or-later). TargetBar is not VanaCore, and isn't made or endorsed by Vekien; VanaCore's name and logo aren't licensed with it.

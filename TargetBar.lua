@@ -1,6 +1,12 @@
 --[[
 TargetBar - target HP% as a bar centered on the screen.
-Copyright (c) 2026 seekey13. MIT License, see LICENSE.
+Copyright (c) 2026 seekey13. GPL-3.0-or-later, see LICENSE.
+
+The settings window is based on Sidekick3's ui/kit.lua and ui/window.lua,
+which are based on VanaCore's addons/vanacore/vana/draw.lua and vana.lua,
+Copyright (C) 2026 Vekien (GPL-3.0-or-later). TargetBar is not VanaCore,
+and isn't made or endorsed by Vekien; VanaCore's name and logo aren't
+licensed with it.
 
 The bar matches Sidekick3's HUD HP bar (ui/window.lua, ui/kit.lua):
 rose fill #EE6F78, near-black track #0C0C0C, both at 70%, a 1px #0C0C0C
@@ -9,7 +15,11 @@ Sidekick3 tints that track gray while the pointer is over its panel.
 This bar stays on the near-black combat color, so it does not flash when
 the cursor crosses the middle of the screen.
 
-The target's name is centered above the bar. Under it, a mob's damage
+The bar is for mobs and players. An NPC or an object draws nothing.
+
+The target's name is centered above the bar, white over 75% HP, then
+yellow, orange at 50% and red at 25%, as Sidekick3 colors a name on an HP
+bar. Under it, a mob's damage
 weakness and resistance: mobdb's icons, strongest first, one percentage
 on the last icon of each equal group. That row is how Floaties draws it
 (lib/mobinfo.lua M.resist, drawn under the panel). Beside the bar, the
@@ -20,8 +30,8 @@ bar, the detection icons, the weakness icons, and the resistance icons.
 The bar itself stays.
 
 Text is Sidekick3's HUD face (ui/kit.lua): Segoe UI Semibold, a 1px black
-halo at 85%. The name is name_size and the numbers are text_size, the
-sizes this HUD is set to.
+halo at 85%. The name, the numbers and the icons each have a size in the
+settings window, as Sidekick3's HUD has Name and Text font size.
 
 HP comes from the main target, the same read as HXUI's target bar:
 GetTarget():GetTargetIndex(0), then that entity's HP percent.
@@ -53,6 +63,15 @@ local WIDTH_MIN, WIDTH_MAX   = 40, 5120;
 local HEIGHT_MIN, HEIGHT_MAX = 8, 160;
 local Y_MIN, Y_MAX           = 0, 2160;
 
+-- Default text sizes are what the author's Sidekick3 HUD is set to
+-- (config/addons/Sidekick3/<character>/ui.lua). The ranges are that HUD's
+-- Name and Text font size sliders. The icon is Floaties' resist row: its
+-- side, and the gap after a group.
+local DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON = 25, 20, 32;
+local NAME_MIN, NAME_MAX = 8, 64;
+local TEXT_MIN, TEXT_MAX = 8, 48;
+local ICON_MIN, ICON_MAX = 8, 64;
+
 local FILL   = '#EE6F78';
 local TRACK  = '#0C0C0C';
 local EDGE   = '#0C0C0C';
@@ -61,13 +80,13 @@ local RADIUS = 4;
 local EASE   = 12; -- share of the remaining fill covered per second
 
 -- Sidekick3 ui/kit.lua draws HUD names in Segoe UI Semibold (seguisb.ttf)
--- and stamps a 1px black halo under the fill. name_size and text_size are
--- the sizes that HUD is set to (config/addons/Sidekick3/<character>/ui.lua).
-local NAME_PX = 25;
-local TEXT_PX = 20;
+-- and stamps a 1px black halo under the fill.
 local HALO_A  = 0.85;
 local GAP     = 4;
-local ICON    = 32; -- Floaties' resist row: icon side, and the gap after a group
+
+-- A name on an HP bar in Sidekick3 (ui/window.lua name_color, kit.P):
+-- white over 75%, then yellow, orange at 50% and red at 25%.
+local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E8883A', '#E8454E';
 
 local AROUND = {
     { -1, -1 }, { 0, -1 }, { 1, -1 },
@@ -93,6 +112,9 @@ local LEFT_CORNERS = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left;
 local defaults = T{
     width  = DEFAULT_WIDTH,
     height = DEFAULT_HEIGHT,
+    name_size = DEFAULT_NAME,
+    text_size = DEFAULT_TEXT,
+    icon_size = DEFAULT_ICON,
     show_name = true,
     show_hp = true,
     show_detection = true,
@@ -188,6 +210,9 @@ local function sanitize()
     cfg.width  = clamp(cfg.width, WIDTH_MIN, WIDTH_MAX, DEFAULT_WIDTH);
     cfg.height = clamp(cfg.height, HEIGHT_MIN, HEIGHT_MAX, DEFAULT_HEIGHT);
     if cfg.y ~= nil then cfg.y = clamp(cfg.y, Y_MIN, Y_MAX, nil); end
+    cfg.name_size = clamp(cfg.name_size, NAME_MIN, NAME_MAX, DEFAULT_NAME);
+    cfg.text_size = clamp(cfg.text_size, TEXT_MIN, TEXT_MAX, DEFAULT_TEXT);
+    cfg.icon_size = clamp(cfg.icon_size, ICON_MIN, ICON_MAX, DEFAULT_ICON);
     cfg.show_name = on_unless_off(cfg.show_name);
     cfg.show_hp = on_unless_off(cfg.show_hp);
     cfg.show_detection = on_unless_off(cfg.show_detection);
@@ -242,8 +267,11 @@ local function fill(dl, x, y, w, h, color, radius, alpha, corners)
     end
 end
 
-local function is_mob(flags)
-    return type(flags) == 'number' and bit.band(flags, 0x10) ~= 0;
+-- Spawn flags: 0x01 a player, 0x10 a mob (trusts and pets carry it too).
+-- An NPC (0x02) or an object has neither. Floaties' stats.targetable draws
+-- its target panel by the same test: a shopkeeper with an HP bar is noise.
+local function has_flag(flags, bit_)
+    return type(flags) == 'number' and bit.band(flags, bit_) ~= 0;
 end
 
 -- A trust carries the mob flag but is a party member. Its mobdb row, if
@@ -259,7 +287,9 @@ local function in_party(sid)
     return ok and yes == true;
 end
 
--- The main target. Index 0 is "no target". HXUI reads this same index and HPPercent.
+-- The main target, when it is a mob or a player. Index 0 is "no target".
+-- HXUI reads this same index and HPPercent. Flags that cannot be read keep
+-- the bar: an unknown is not taken for an NPC.
 local function read_target()
     local ok, found = pcall(function ()
         local mm = AshitaCore:GetMemoryManager();
@@ -270,15 +300,15 @@ local function read_target()
         if type(index) ~= 'number' or index <= 0 or index > 2303 then return nil; end
         index = math.floor(index);
 
-        local name, hpp, sid, mob;
+        local name, hpp, sid, flags;
         if type(GetEntity) == 'function' then
             local ent_ok, ent = pcall(GetEntity, index);
             if ent_ok and ent ~= nil then
                 name = ent.Name;
                 hpp  = ent.HPPercent;
                 sid  = ent.ServerId;
-                local flags_ok, flags = pcall(function () return ent.SpawnFlags; end);
-                if flags_ok then mob = is_mob(flags); end
+                local flags_ok, read = pcall(function () return ent.SpawnFlags; end);
+                if flags_ok then flags = tonumber(read); end
             end
         end
         local entities = mm:GetEntity();
@@ -288,15 +318,17 @@ local function read_target()
             hpp  = entities:GetHPPercent(index);
             sid  = entities:GetServerId(index);
         end
-        if not mob and entities ~= nil and type(entities.GetSpawnFlags) == 'function' then
-            local flags_ok, flags = pcall(function () return entities:GetSpawnFlags(index); end);
-            if flags_ok then mob = is_mob(flags); end
+        if flags == nil and entities ~= nil and type(entities.GetSpawnFlags) == 'function' then
+            local flags_ok, read = pcall(function () return entities:GetSpawnFlags(index); end);
+            if flags_ok then flags = tonumber(read); end
         end
         if type(name) ~= 'string' or name == '' then return nil; end
+        local mob = has_flag(flags, 0x10);
+        if flags ~= nil and not mob and not has_flag(flags, 0x01) then return nil; end
         hpp = tonumber(hpp) or 0;
         if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
         if sid == nil or sid == 0 then sid = index; end
-        mob = mob == true and not in_party(sid);
+        mob = mob and not in_party(sid);
         return { id = sid, hpp = hpp, name = name, index = index, mob = mob };
     end);
     if ok then return found; end
@@ -393,28 +425,35 @@ local function lift(h)
     return math.floor(h * 0.06 + 0.5);
 end
 
--- Sidekick3's halo: the string in black a pixel out each way, then the fill.
-local function halo(dl, x, y, px, text)
+-- Sidekick3's halo: the string in black a pixel out each way, then the fill (white unless given).
+local function halo(dl, x, y, px, text, color)
     local font = fonts.semi;
     if font == nil or text == nil or text == '' then return; end
     x, y = math.floor(x + 0.5), math.floor(y + 0.5);
-    local dark, ink = u32('#000000', HALO_A), u32('#FFFFFF', 1);
+    local dark, ink = u32('#000000', HALO_A), u32(color or '#FFFFFF', 1);
     for _, o in ipairs(AROUND) do
         dl:AddText(font, px, { x + o[1], y + o[2] }, dark, text);
     end
     dl:AddText(font, px, { x, y }, ink, text);
 end
 
-local function draw_name(dl, x, y, w, name)
-    local tw, th = measure(name, NAME_PX);
-    halo(dl, x + (w - tw) / 2, y - GAP - th, NAME_PX, name);
+local function name_color(hpp)
+    if hpp <= 25 then return NAME_RED; end
+    if hpp <= 50 then return NAME_ORANGE; end
+    if hpp <= 75 then return NAME_YELLOW; end
+    return NAME_WHITE;
+end
+
+local function draw_name(dl, x, y, w, name, hpp)
+    local tw, th = measure(name, cfg.name_size);
+    halo(dl, x + (w - tw) / 2, y - GAP - th, cfg.name_size, name, name_color(hpp));
 end
 
 local function draw_label(dl, x, y, w, h, hpp)
     local label = ('%d%%'):format(math.floor(hpp + 0.5));
-    local tw, th = measure(label, TEXT_PX);
+    local tw, th = measure(label, cfg.text_size);
     local ty = y + (h - th) / 2 - lift(th);
-    halo(dl, x + (w - tw) / 2, ty, TEXT_PX, label);
+    halo(dl, x + (w - tw) / 2, ty, cfg.text_size, label);
 end
 
 -- "+25%" / "-12.5%" from a 1.25 / 0.875 multiplier. One decimal, trailing
@@ -592,56 +631,60 @@ local function segment_width(seg)
     local width = 0;
     local handle = icon_handle(seg.icon);
     if handle ~= nil then
-        width = ICON;
+        width = cfg.icon_size;
     elseif seg.alt ~= nil then
-        width = measure(seg.alt, TEXT_PX);
+        width = measure(seg.alt, cfg.text_size);
     end
-    if seg.text ~= nil then width = width + measure(seg.text, TEXT_PX); end
+    if seg.text ~= nil then width = width + measure(seg.text, cfg.text_size); end
     return width;
 end
 
--- One segment, top-left at (cursor, row_y). A missing texture draws `alt`
--- in the icon's place, the same fallback the damage row uses. Returns the
--- x the next segment starts at, before any gap the caller adds.
+-- One segment, top-left at (cursor, row_y), in a row icon_size tall. A
+-- missing texture draws `alt` in the icon's place, the same fallback the
+-- damage row uses. Returns the x the next segment starts at, before any
+-- gap the caller adds.
 local function paint_segment(dl, cursor, row_y, seg)
+    local icon, px = cfg.icon_size, cfg.text_size;
     local handle = icon_handle(seg.icon);
     if handle ~= nil then
         local drawn = pcall(function ()
-            dl:AddImage(handle, { cursor, row_y }, { cursor + ICON, row_y + ICON },
+            dl:AddImage(handle, { cursor, row_y }, { cursor + icon, row_y + icon },
                 { 0, 0 }, { 1, 1 }, 0xFFFFFFFF);
         end);
         if drawn then
-            cursor = cursor + ICON;
+            cursor = cursor + icon;
         elseif seg.alt ~= nil then
-            local aw, ah = measure(seg.alt, TEXT_PX);
-            halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
+            local aw, ah = measure(seg.alt, px);
+            halo(dl, cursor, row_y + (icon - ah) / 2 - lift(ah), px, seg.alt);
             cursor = cursor + aw;
         end
     elseif seg.alt ~= nil then
-        local aw, ah = measure(seg.alt, TEXT_PX);
-        halo(dl, cursor, row_y + (ICON - ah) / 2 - lift(ah), TEXT_PX, seg.alt);
+        local aw, ah = measure(seg.alt, px);
+        halo(dl, cursor, row_y + (icon - ah) / 2 - lift(ah), px, seg.alt);
         cursor = cursor + aw;
     end
     if seg.text ~= nil then
-        local tw, th = measure(seg.text, TEXT_PX);
-        halo(dl, cursor, row_y + (ICON - th) / 2 - lift(th), TEXT_PX, seg.text);
+        local tw, th = measure(seg.text, px);
+        halo(dl, cursor, row_y + (icon - th) / 2 - lift(th), px, seg.text);
         cursor = cursor + tw;
     end
     return cursor;
 end
 
+-- The damage row under the bar. A group ends with an icon's width of space,
+-- so its percentage reads as its own.
 local function draw_resists(dl, x, y, w, h, segments)
     if segments == nil then return; end
     local total = 0;
     for i, seg in ipairs(segments) do
         total = total + segment_width(seg);
-        if i < #segments and seg.group_end then total = total + ICON; end
+        if i < #segments and seg.group_end then total = total + cfg.icon_size; end
     end
     local cursor = math.floor(x + (w - total) / 2 + 0.5);
     local row_y = math.floor(y + h + GAP + 0.5);
     for i, seg in ipairs(segments) do
         cursor = paint_segment(dl, cursor, row_y, seg);
-        if i < #segments and seg.group_end then cursor = cursor + ICON; end
+        if i < #segments and seg.group_end then cursor = cursor + cfg.icon_size; end
     end
 end
 
@@ -650,7 +693,7 @@ end
 -- flush: Floaties' own gap is 0, and the PNGs carry their own padding.
 -- Neither group changes the bar's width or its place on the screen.
 local function draw_flanks(dl, x, y, w, h, left, right)
-    local row_y = math.floor(y + (h - ICON) / 2 + 0.5);
+    local row_y = math.floor(y + (h - cfg.icon_size) / 2 + 0.5);
     if left ~= nil and #left > 0 then
         local width = 0;
         for i = 1, #left do width = width + segment_width(left[i]); end
@@ -1040,21 +1083,42 @@ local function note(pg, s, color)
     pg.y = pg.y + S(22);
 end
 
-local TOGGLES = {
+-- The page's groups, top to bottom. A switch: { label, id, key, help }.
+-- A slider: { label, id, key, help, min, max }. Bar's three sliders are
+-- built as the page is drawn, as Width and Y follow the screen.
+local SHOW = {
     { 'Name', '##tb_name', 'show_name', 'The name above the bar.' },
     { 'HP %', '##tb_hp', 'show_hp', 'The percent on the bar.' },
     { 'Detection', '##tb_detect', 'show_detection', 'Aggro and Link on the left of the bar. Senses on the right.' },
     { 'Weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
     { 'Resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
 };
+local SIZES = {
+    { 'Name font size', '##tb_name_px', 'name_size', 'Pixels.', NAME_MIN, NAME_MAX },
+    { 'Text font size', '##tb_text_px', 'text_size', 'Pixels: the HP % and the percentages and words beside the icons.',
+        TEXT_MIN, TEXT_MAX },
+    { 'Icon size', '##tb_icon_px', 'icon_size', 'Pixels: the detection and damage icons, and the space between damage groups.',
+        ICON_MIN, ICON_MAX },
+};
+local BAR_ROWS = 3;
 
 -- The page from the top: the title bar and its line, 10 more, each group's
 -- heading (8 above, 26 for it) and rows, the button's row (a row and 4),
 -- the note (22), and 14 under it. draw_config lays it out in this order.
 local function page_height()
     return S(TITLE_H) + 1 + S(10)
-        + 2 * (S(8) + S(26)) + (#TOGGLES + 3) * S(ROW_H)
+        + 3 * (S(8) + S(26)) + (#SHOW + #SIZES + BAR_ROWS) * S(ROW_H)
         + S(ROW_H) + S(4) + S(22) + S(14);
+end
+
+-- A labelled slider row that writes cfg[key].
+local function slider_row(pg, row, value, min, max)
+    local cy = line(pg, row[1], row[4]);
+    local v, moved = slider(row[2], pg.right - S(SLIDER_W), cy, S(SLIDER_W), value, min, max, 'px');
+    if moved and v ~= cfg[row[3]] then
+        cfg[row[3]] = v;
+        dirty = true;
+    end
 end
 
 local function draw_config(has_target)
@@ -1063,10 +1127,10 @@ local function draw_config(has_target)
     local _, bar_y, _, bar_h = bar_rect();
     local wmax = math.max(WIDTH_MIN, math.min(WIDTH_MAX, math.floor(sw)));
     local ymax = math.max(Y_MIN, math.floor(sh - bar_h));
-    local sliders = {
-        { 'Width', '##tb_w', 'width', math.min(cfg.width, wmax), WIDTH_MIN, wmax, 'Pixels, up to the screen\'s width.' },
-        { 'Height', '##tb_h', 'height', cfg.height, HEIGHT_MIN, HEIGHT_MAX, 'Pixels.' },
-        { 'Y', '##tb_y', 'y', bar_y, Y_MIN, ymax, 'Pixels from the top of the screen to the bar.' },
+    local bar_rows = {
+        { { 'Width', '##tb_w', 'width', 'Pixels, up to the screen\'s width.' }, math.min(cfg.width, wmax), WIDTH_MIN, wmax },
+        { { 'Height', '##tb_h', 'height', 'Pixels.' }, cfg.height, HEIGHT_MIN, HEIGHT_MAX },
+        { { 'Y', '##tb_y', 'y', 'Pixels from the top of the screen to the bar.' }, bar_y, Y_MIN, ymax },
     };
     local pw, ph, m = S(PAGE_W), page_height(), S(MARGIN);
     imgui.SetNextWindowPos({ sw / 2, sh / 2 }, ImGuiCond_FirstUseEver, { 0.5, 0.5 });
@@ -1098,18 +1162,16 @@ local function draw_config(has_target)
                 lx = x + S(LEFT), right = x + pw - S(PAD),
             };
             subheader(pg, 'Show');
-            for _, item in ipairs(TOGGLES) do
+            for _, item in ipairs(SHOW) do
                 local cy = line(pg, item[1], item[4]);
                 local on, flipped = switch(item[2], pg.right - S(SW_W), cy, cfg[item[3]] == true);
                 if imgui.IsItemHovered() then tooltip(item[4]); end
                 if flipped then cfg[item[3]] = on; dirty = true; end
             end
+            subheader(pg, 'Text and icons');
+            for _, row in ipairs(SIZES) do slider_row(pg, row, cfg[row[3]], row[5], row[6]); end
             subheader(pg, 'Bar');
-            for _, row in ipairs(sliders) do
-                local cy = line(pg, row[1], row[7]);
-                local v, moved = slider(row[2], pg.right - S(SLIDER_W), cy, S(SLIDER_W), row[4], row[5], row[6], 'px');
-                if moved and v ~= cfg[row[3]] then cfg[row[3]] = v; dirty = true; end
-            end
+            for _, r in ipairs(bar_rows) do slider_row(pg, r[1], r[2], r[3], r[4]); end
 
             local by = line(pg, nil, nil, S(ROW_H) + S(4));
             if button('##tb_reset', pg.lx, by, 'Reset position') then
@@ -1179,7 +1241,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     local dl = imgui.GetBackgroundDrawList();
     draw_bar(dl, x, y, w, h, hpp, smooth(id, hpp));
     if cfg.show_name then
-        draw_name(dl, x, y, w, target ~= nil and target.name or 'Target');
+        draw_name(dl, x, y, w, target ~= nil and target.name or 'Target', hpp);
     end
     local res = nil;
     if target == nil then
@@ -1215,7 +1277,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
         say(config_open and 'Settings open. /tb closes them.' or 'Settings closed.');
         report();
     elseif sub == 'help' then
-        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns width and height, and centers the bar.');
+        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns the bar and text sizes, and centers the bar.');
     elseif sub == 'width' then
         set_number('width', args[3], WIDTH_MIN, WIDTH_MAX);
     elseif sub == 'height' then
@@ -1224,6 +1286,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
         set_number('y', args[3], Y_MIN, Y_MAX);
     elseif sub == 'reset' then
         cfg.width, cfg.height, cfg.y = DEFAULT_WIDTH, DEFAULT_HEIGHT, nil;
+        cfg.name_size, cfg.text_size, cfg.icon_size = DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON;
         settings.save();
         dirty = false;
         say('Reset.');
