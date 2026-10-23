@@ -7,7 +7,7 @@ TargetBar is not VanaCore, and isn't made or endorsed by Vekien.
 
 The bar is a rose fill #EE6F78 on a near-black #0C0C0C track, both at
 70%, with a 1px #0C0C0C edge and 4px corners. A partial fill rounds the
-left end only. It draws for mobs and players. An NPC or an object gets
+left end only. It draws for mobs, players and pets. An NPC or an object gets
 its name in #C2FFC2 on black at 40%, only as wide as the name, and no
 percent.
 
@@ -262,11 +262,28 @@ local function fill(dl, x, y, w, h, color, radius, alpha, corners)
     end
 end
 
--- Spawn flags: 0x01 a player, 0x10 a mob (trusts and pets carry it too).
+-- Spawn flags: 0x01 a player, 0x10 a mob (trusts carry it too).
 -- An NPC (0x02) or an object has neither, and gets only its name: a
--- shopkeeper with an HP bar is noise.
+-- shopkeeper with an HP bar is noise. A pet has neither either (see is_pet).
 local function has_flag(flags, bit_)
     return type(flags) == 'number' and bit.band(flags, bit_) ~= 0;
+end
+
+-- A pet is flagged as an NPC is, but it has an owner: a player whose
+-- PetTargetIndex is the pet's index. Players hold indices 0x400 to 0x6FF.
+-- A pet, as anything spawned after the zone loads, is 0x700 or up, so a
+-- shopkeeper is never scanned. The answer is kept for a second per target.
+local pet_sid, pet_yes, pet_at = nil, false, nil;
+local function is_pet(entities, index, sid)
+    if index < 0x700 or type(entities.GetPetTargetIndex) ~= 'function' then return false; end
+    local now = os.clock();
+    if sid == pet_sid and pet_at ~= nil and now - pet_at >= 0 and now - pet_at < 1 then return pet_yes; end
+    local yes = false;
+    for i = 0x400, 0x6FF do
+        if entities:GetPetTargetIndex(i) == index then yes = true; break; end
+    end
+    pet_sid, pet_yes, pet_at = sid, yes, now;
+    return yes;
 end
 
 -- A trust carries the mob flag but is a party member. Its mobdb row, if
@@ -283,8 +300,8 @@ local function in_party(sid)
 end
 
 -- The main target. Index 0 is "no target". HXUI reads this same index and
--- HPPercent. `npc` is neither a mob nor a player. Flags that cannot be
--- read keep the bar: an unknown is not taken for an NPC.
+-- HPPercent. `npc` is neither a mob, a player, nor a pet. Flags that cannot
+-- be read keep the bar: an unknown is not taken for an NPC.
 local function read_target()
     local ok, found = pcall(function ()
         local mm = AshitaCore:GetMemoryManager();
@@ -319,10 +336,11 @@ local function read_target()
         end
         if type(name) ~= 'string' or name == '' then return nil; end
         local mob = has_flag(flags, 0x10);
-        local npc = flags ~= nil and not mob and not has_flag(flags, 0x01);
         hpp = tonumber(hpp) or 0;
         if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
         if sid == nil or sid == 0 then sid = index; end
+        local npc = flags ~= nil and not mob and not has_flag(flags, 0x01)
+            and not (entities ~= nil and is_pet(entities, index, sid));
         mob = mob and not in_party(sid);
         return { id = sid, hpp = hpp, name = name, index = index, mob = mob, npc = npc };
     end);
