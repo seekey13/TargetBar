@@ -4,7 +4,7 @@ Ashita v4 addon that draws your target's HP% as a bar anchored to the horizontal
 
 The fill is Sidekick3's Vanacore HP red (`#EE6F78`) at 70%. The track behind it is the near-black Sidekick3 uses while you are fighting (`#0C0C0C`) at 70%, with a 1px edge and 4px corners. The number on the right end of the bar is the target's current HP%. The fill eases toward that number.
 
-The HP bar is for mobs and players. An NPC (a shopkeeper, a door, a Home Point) has no HP to show, so it gets only its name, in a full pale green (`#C2FFC2`) bar no wider than the name, centered on the screen at the bar's height. There is no HP% on it. With the name hidden, an NPC draws nothing.
+The HP bar is for mobs and players. An NPC (a shopkeeper, a door, a Home Point) has no HP to show, so it gets only its name, in pale green (`#C2FFC2`), on a black background at 40% no wider than the name, centered on the screen at the bar's height. There is no HP% on it. With the name hidden, an NPC draws nothing.
 
 The target's name sits inside the bar, on the left. Both the name and the HP% sit the edge offset (8px to start) in from the ends of the bar. A name too long to fit before the HP% is cut short with `...`. The name is white over 75% HP, yellow at 75%, orange at 50%, and red at 25%, the colors Sidekick3 gives a name on an HP bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name starts at 25px, the numbers at 20px, and the icons at 32px. Each has a slider. On Ashita 4.16's ImGui 1.80, which bakes a font at one size, each face is baked once and scaled: the HUD's at 32px, the settings window's at 18px. Text well past its bake is a little soft. Without Segoe UI installed, the same sizes are drawn in ImGui's own font.
 

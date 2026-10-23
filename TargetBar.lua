@@ -7,8 +7,9 @@ TargetBar is not VanaCore, and isn't made or endorsed by Vekien.
 
 The bar is a rose fill #EE6F78 on a near-black #0C0C0C track, both at
 70%, with a 1px #0C0C0C edge and 4px corners. A partial fill rounds the
-left end only. It draws for mobs and players. An NPC or an object gets a
-full #C2FFC2 bar only as wide as its name, and no percent.
+left end only. It draws for mobs and players. An NPC or an object gets
+its name in #C2FFC2 on black at 40%, only as wide as the name, and no
+percent.
 
 The target's name is inside the bar on the left, white over 75% HP, then
 yellow, orange at 50% and red at 25%. The percent is on the right. Both
@@ -61,7 +62,6 @@ local ICON_MIN, ICON_MAX = 8, 64;
 local OFFSET_MIN, OFFSET_MAX = 0, 64;
 
 local FILL   = '#EE6F78';
-local NPC_FILL = '#C2FFC2';
 local TRACK  = '#0C0C0C';
 local EDGE   = '#0C0C0C';
 local BAR_A  = 0.70;
@@ -75,6 +75,9 @@ local GAP     = 4;
 
 -- The name's color: white over 75% HP, then yellow, orange at 50% and red at 25%.
 local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E8883A', '#E8454E';
+
+-- An NPC's bar: its name in pale green on black at 40%.
+local NPC_TEXT, PLATE, PLATE_A = '#C2FFC2', '#000000', 0.40;
 
 local AROUND = {
     { -1, -1 }, { 0, -1 }, { 1, -1 },
@@ -483,14 +486,15 @@ local function fit(text, px, room)
 end
 
 -- The name inside the bar, the edge offset in from its left end, its middle
--- on the bar's. With the percent beside it, it stops a gap short of the
--- widest percent, so the cut does not move as HP does.
-local function draw_name(dl, x, y, w, h, name, hpp, beside_hp)
+-- on the bar's, in `color` (its HP's unless given). With the percent beside
+-- it, it stops a gap short of the widest percent, so the cut does not move
+-- as HP does.
+local function draw_name(dl, x, y, w, h, name, hpp, beside_hp, color)
     local room = w - cfg.edge_offset * 2;
     if beside_hp then room = room - measure('100%', cfg.text_size) - GAP; end
     name = fit(name, cfg.name_size, room);
     local _, th = measure(name, cfg.name_size);
-    halo(dl, x + cfg.edge_offset, y + (h - th) / 2 - lift(th), cfg.name_size, name, name_color(hpp));
+    halo(dl, x + cfg.edge_offset, y + (h - th) / 2 - lift(th), cfg.name_size, name, color or name_color(hpp));
 end
 
 -- The percent inside the bar, the edge offset in from its right end.
@@ -751,9 +755,8 @@ local function draw_flanks(dl, x, y, w, h, left, right)
     end
 end
 
--- `fill_hpp` is the eased width, in `color` (FILL unless given). The text
--- goes on after (see d3d_present).
-local function draw_bar(dl, x, y, w, h, fill_hpp, color)
+-- `fill_hpp` is the eased width. The text goes on after (see d3d_present).
+local function draw_bar(dl, x, y, w, h, fill_hpp)
     x, y = math.floor(x + 0.5), math.floor(y + 0.5);
     w, h = math.floor(w + 0.5), math.floor(h + 0.5);
     local r = math.min(RADIUS, math.floor(h / 2), math.floor(w / 2));
@@ -762,9 +765,14 @@ local function draw_bar(dl, x, y, w, h, fill_hpp, color)
     local fw = math.floor(w * f + 0.5);
     if fw > 0 then
         local partial = fw < w;
-        fill(dl, x, y, fw, h, color or FILL, math.min(r, fw / 2), BAR_A, partial and LEFT_CORNERS or nil);
+        fill(dl, x, y, fw, h, FILL, math.min(r, fw / 2), BAR_A, partial and LEFT_CORNERS or nil);
     end
     dl:AddRect({ x, y }, { x + w, y + h }, u32(EDGE, BAR_A), r);
+end
+
+-- An NPC's bar: the background alone, PLATE at PLATE_A, cornered as the bar is.
+local function draw_plate(dl, x, y, w, h)
+    fill(dl, x, y, w, h, PLATE, math.min(RADIUS, math.floor(h / 2), math.floor(w / 2)), PLATE_A);
 end
 
 -- The bar's box, `width` wide (the setting's unless given): centered
@@ -1293,7 +1301,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
         return;
     end
 
-    -- An NPC's bar is full, in NPC_FILL, no percent, and only as wide as its name and an offset each side.
+    -- An NPC's bar is a plate with no fill or percent, only as wide as its name and an offset each side.
     local x, y, w, h;
     if npc then
         x, y, w, h = bar_rect(math.ceil(measure(target.name, cfg.name_size) + cfg.edge_offset * 2));
@@ -1302,10 +1310,11 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     end
     local dl = imgui.GetBackgroundDrawList();
     local label = cfg.show_hp and not npc;
-    draw_bar(dl, x, y, w, h, smooth(id, hpp), npc and NPC_FILL or nil);
+    local fill_hpp = smooth(id, hpp);
+    if npc then draw_plate(dl, x, y, w, h); else draw_bar(dl, x, y, w, h, fill_hpp); end
     if label then pcall(draw_label, dl, x, y, w, h, hpp); end
     if cfg.show_name then
-        draw_name(dl, x, y, w, h, target ~= nil and target.name or 'Target', hpp, label);
+        draw_name(dl, x, y, w, h, target ~= nil and target.name or 'Target', hpp, label, npc and NPC_TEXT or nil);
     end
     local res = nil;
     if target == nil then
