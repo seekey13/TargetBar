@@ -7,11 +7,13 @@ TargetBar is not VanaCore, and isn't made or endorsed by Vekien.
 
 The bar is a rose fill #EE6F78 on a near-black #0C0C0C track, both at
 70%, with a 1px #0C0C0C edge and 4px corners. A partial fill rounds the
-left end only. It draws for mobs and players. An NPC or an object draws
-nothing.
+left end only. It draws for mobs and players. An NPC or an object gets
+its name in #C2FFC2 on black at 40%, only as wide as the name, and no
+percent.
 
-The target's name is centered above the bar, white over 75% HP, then
-yellow, orange at 50% and red at 25%. Under the bar, a mob's damage
+The target's name is inside the bar on the left, white over 75% HP, then
+yellow, orange at 50% and red at 25%. The percent is on the right. Both
+sit the edge offset in from the bar's ends. Under the bar, a mob's damage
 weakness and resistance: mobdb's icons, strongest first, one percentage
 on the last icon of each equal group. Beside the bar, its detection:
 aggro or passive, then Link, on the left, and TrueSight, Sight, Sound,
@@ -51,11 +53,13 @@ local HEIGHT_MIN, HEIGHT_MAX = 8, 160;
 local Y_MIN, Y_MAX           = 0, 2160;
 
 -- Text and icon sizes, and their slider ranges. An icon's size is also the
--- gap after a damage group.
-local DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON = 25, 20, 32;
+-- gap after a damage group. The offset is the space between the bar's ends
+-- and the name and the percent inside it.
+local DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON, DEFAULT_OFFSET = 25, 20, 32, 8;
 local NAME_MIN, NAME_MAX = 8, 64;
 local TEXT_MIN, TEXT_MAX = 8, 48;
 local ICON_MIN, ICON_MAX = 8, 64;
+local OFFSET_MIN, OFFSET_MAX = 0, 64;
 
 local FILL   = '#EE6F78';
 local TRACK  = '#0C0C0C';
@@ -65,12 +69,15 @@ local RADIUS = 4;
 local EASE   = 12; -- share of the remaining fill covered per second
 
 -- Text is stamped over a 1px black halo. GAP is the space between the bar
--- and the text and icons around it.
+-- and the text and icons around it, and between the name and the percent.
 local HALO_A  = 0.85;
 local GAP     = 4;
 
 -- The name's color: white over 75% HP, then yellow, orange at 50% and red at 25%.
 local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E8883A', '#E8454E';
+
+-- An NPC's bar: its name in pale green on black at 40%.
+local NPC_TEXT, PLATE, PLATE_A = '#C2FFC2', '#000000', 0.40;
 
 local AROUND = {
     { -1, -1 }, { 0, -1 }, { 1, -1 },
@@ -99,6 +106,7 @@ local defaults = T{
     name_size = DEFAULT_NAME,
     text_size = DEFAULT_TEXT,
     icon_size = DEFAULT_ICON,
+    edge_offset = DEFAULT_OFFSET,
     show_name = true,
     show_hp = true,
     show_detection = true,
@@ -199,6 +207,7 @@ local function sanitize()
     cfg.name_size = clamp(cfg.name_size, NAME_MIN, NAME_MAX, DEFAULT_NAME);
     cfg.text_size = clamp(cfg.text_size, TEXT_MIN, TEXT_MAX, DEFAULT_TEXT);
     cfg.icon_size = clamp(cfg.icon_size, ICON_MIN, ICON_MAX, DEFAULT_ICON);
+    cfg.edge_offset = clamp(cfg.edge_offset, OFFSET_MIN, OFFSET_MAX, DEFAULT_OFFSET);
     cfg.show_name = on_unless_off(cfg.show_name);
     cfg.show_hp = on_unless_off(cfg.show_hp);
     cfg.show_detection = on_unless_off(cfg.show_detection);
@@ -254,8 +263,8 @@ local function fill(dl, x, y, w, h, color, radius, alpha, corners)
 end
 
 -- Spawn flags: 0x01 a player, 0x10 a mob (trusts and pets carry it too).
--- An NPC (0x02) or an object has neither, and gets no bar: a shopkeeper
--- with an HP bar is noise.
+-- An NPC (0x02) or an object has neither, and gets only its name: a
+-- shopkeeper with an HP bar is noise.
 local function has_flag(flags, bit_)
     return type(flags) == 'number' and bit.band(flags, bit_) ~= 0;
 end
@@ -273,9 +282,9 @@ local function in_party(sid)
     return ok and yes == true;
 end
 
--- The main target, when it is a mob or a player. Index 0 is "no target".
--- HXUI reads this same index and HPPercent. Flags that cannot be read keep
--- the bar: an unknown is not taken for an NPC.
+-- The main target. Index 0 is "no target". HXUI reads this same index and
+-- HPPercent. `npc` is neither a mob nor a player. Flags that cannot be
+-- read keep the bar: an unknown is not taken for an NPC.
 local function read_target()
     local ok, found = pcall(function ()
         local mm = AshitaCore:GetMemoryManager();
@@ -310,12 +319,12 @@ local function read_target()
         end
         if type(name) ~= 'string' or name == '' then return nil; end
         local mob = has_flag(flags, 0x10);
-        if flags ~= nil and not mob and not has_flag(flags, 0x01) then return nil; end
+        local npc = flags ~= nil and not mob and not has_flag(flags, 0x01);
         hpp = tonumber(hpp) or 0;
         if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
         if sid == nil or sid == 0 then sid = index; end
         mob = mob and not in_party(sid);
-        return { id = sid, hpp = hpp, name = name, index = index, mob = mob };
+        return { id = sid, hpp = hpp, name = name, index = index, mob = mob, npc = npc };
     end);
     if ok then return found; end
     return nil;
@@ -456,16 +465,44 @@ local function name_color(hpp)
     return NAME_WHITE;
 end
 
-local function draw_name(dl, x, y, w, name, hpp)
-    local tw, th = measure(name, cfg.name_size);
-    halo(dl, x + (w - tw) / 2, y - GAP - th, cfg.name_size, name, name_color(hpp));
+local cuts, cuts_n = {}, 0;
+
+-- `text` cut short to fit `room` pixels at `px`, ending in '...'. Whole when
+-- it fits, '' when not even a letter and the dots do. Cached, as measure is.
+local function fit(text, px, room)
+    if measure(text, px) <= room then return text; end
+    local key = px .. '|' .. math.floor(room) .. '|' .. text;
+    local cut = cuts[key];
+    if cut ~= nil then return cut; end
+    cut = '';
+    for n = #text - 1, 1, -1 do
+        local s = text:sub(1, n):gsub('%s+$', '') .. '...';
+        if measure(s, px) <= room then cut = s; break; end
+    end
+    if cuts_n >= 1000 then cuts, cuts_n = {}, 0; end
+    cuts[key] = cut;
+    cuts_n = cuts_n + 1;
+    return cut;
 end
 
+-- The name inside the bar, the edge offset in from its left end, its middle
+-- on the bar's, in `color` (its HP's unless given). With the percent beside
+-- it, it stops a gap short of the widest percent, so the cut does not move
+-- as HP does.
+local function draw_name(dl, x, y, w, h, name, hpp, beside_hp, color)
+    local room = w - cfg.edge_offset * 2;
+    if beside_hp then room = room - measure('100%', cfg.text_size) - GAP; end
+    name = fit(name, cfg.name_size, room);
+    local _, th = measure(name, cfg.name_size);
+    halo(dl, x + cfg.edge_offset, y + (h - th) / 2 - lift(th), cfg.name_size, name, color or name_color(hpp));
+end
+
+-- The percent inside the bar, the edge offset in from its right end.
 local function draw_label(dl, x, y, w, h, hpp)
     local label = ('%d%%'):format(math.floor(hpp + 0.5));
     local tw, th = measure(label, cfg.text_size);
     local ty = y + (h - th) / 2 - lift(th);
-    halo(dl, x + (w - tw) / 2, ty, cfg.text_size, label);
+    halo(dl, x + w - cfg.edge_offset - tw, ty, cfg.text_size, label);
 end
 
 -- "+25%" / "-12.5%" from a 1.25 / 0.875 multiplier. One decimal, trailing
@@ -718,8 +755,8 @@ local function draw_flanks(dl, x, y, w, h, left, right)
     end
 end
 
--- `hpp` is the number drawn. `fill_hpp` is the eased width.
-local function draw_bar(dl, x, y, w, h, hpp, fill_hpp)
+-- `fill_hpp` is the eased width. The text goes on after (see d3d_present).
+local function draw_bar(dl, x, y, w, h, fill_hpp)
     x, y = math.floor(x + 0.5), math.floor(y + 0.5);
     w, h = math.floor(w + 0.5), math.floor(h + 0.5);
     local r = math.min(RADIUS, math.floor(h / 2), math.floor(w / 2));
@@ -731,14 +768,19 @@ local function draw_bar(dl, x, y, w, h, hpp, fill_hpp)
         fill(dl, x, y, fw, h, FILL, math.min(r, fw / 2), BAR_A, partial and LEFT_CORNERS or nil);
     end
     dl:AddRect({ x, y }, { x + w, y + h }, u32(EDGE, BAR_A), r);
-    if cfg.show_hp then pcall(draw_label, dl, x, y, w, h, hpp); end
 end
 
--- The bar's box: centered across, at cfg.y down, or centered down too
--- until it has been placed. Held on the screen.
-local function bar_rect()
+-- An NPC's bar: the background alone, PLATE at PLATE_A, cornered as the bar is.
+local function draw_plate(dl, x, y, w, h)
+    fill(dl, x, y, w, h, PLATE, math.min(RADIUS, math.floor(h / 2), math.floor(w / 2)), PLATE_A);
+end
+
+-- The bar's box, `width` wide (the setting's unless given): centered
+-- across, at cfg.y down, or centered down too until it has been placed.
+-- Held on the screen.
+local function bar_rect(width)
     local sw, sh = screen();
-    local w = math.min(cfg.width, math.floor(sw));
+    local w = math.min(width or cfg.width, math.floor(sw));
     local h = cfg.height;
     local x = math.floor((sw - w) / 2 + 0.5);
     local limit = math.max(0, math.floor(sh - h));
@@ -1103,8 +1145,8 @@ end
 -- A slider: { label, id, key, help, min, max }. Bar's three sliders are
 -- built as the page is drawn, as Width and Y follow the screen.
 local SHOW = {
-    { 'Name', '##tb_name', 'show_name', 'The name above the bar.' },
-    { 'HP %', '##tb_hp', 'show_hp', 'The percent on the bar.' },
+    { 'Name', '##tb_name', 'show_name', 'The name, on the left of the bar. Without it, an NPC draws nothing.' },
+    { 'HP %', '##tb_hp', 'show_hp', 'The percent, on the right of the bar.' },
     { 'Detection', '##tb_detect', 'show_detection', 'Aggro and Link on the left of the bar. Senses on the right.' },
     { 'Weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
     { 'Resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
@@ -1115,6 +1157,8 @@ local SIZES = {
         TEXT_MIN, TEXT_MAX },
     { 'Icon size', '##tb_icon_px', 'icon_size', 'Pixels: the detection and damage icons, and the space between damage groups.',
         ICON_MIN, ICON_MAX },
+    { 'Edge offset', '##tb_offset_px', 'edge_offset', 'Pixels from the ends of the bar to the name and the HP %.',
+        OFFSET_MIN, OFFSET_MAX },
 };
 local BAR_ROWS = 3;
 
@@ -1243,9 +1287,12 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     load_zone(current_zone());
 
     local target = read_target();
+    -- An NPC's bar is there to hold its name. Without the name, it is no target.
+    if target ~= nil and target.npc and not cfg.show_name then target = nil; end
+    local npc = target ~= nil and target.npc;
     local hpp, id;
     if target ~= nil then
-        hpp, id = target.hpp, target.id;
+        hpp, id = npc and 100 or target.hpp, target.id;
     elseif config_open then
         hpp, id = 100, 'preview';
     else
@@ -1254,11 +1301,20 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
         return;
     end
 
-    local x, y, w, h = bar_rect();
+    -- An NPC's bar is a plate with no fill or percent, only as wide as its name and an offset each side.
+    local x, y, w, h;
+    if npc then
+        x, y, w, h = bar_rect(math.ceil(measure(target.name, cfg.name_size) + cfg.edge_offset * 2));
+    else
+        x, y, w, h = bar_rect();
+    end
     local dl = imgui.GetBackgroundDrawList();
-    draw_bar(dl, x, y, w, h, hpp, smooth(id, hpp));
+    local label = cfg.show_hp and not npc;
+    local fill_hpp = smooth(id, hpp);
+    if npc then draw_plate(dl, x, y, w, h); else draw_bar(dl, x, y, w, h, fill_hpp); end
+    if label then pcall(draw_label, dl, x, y, w, h, hpp); end
     if cfg.show_name then
-        draw_name(dl, x, y, w, target ~= nil and target.name or 'Target', hpp);
+        draw_name(dl, x, y, w, h, target ~= nil and target.name or 'Target', hpp, label, npc and NPC_TEXT or nil);
     end
     local res = nil;
     if target == nil then
@@ -1294,7 +1350,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
         say(config_open and 'Settings open. /tb closes them.' or 'Settings closed.');
         report();
     elseif sub == 'help' then
-        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns the bar and text sizes, and centers the bar.');
+        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns the bar and text sizes and the edge offset, and centers the bar.');
     elseif sub == 'width' then
         set_number('width', args[3], WIDTH_MIN, WIDTH_MAX);
     elseif sub == 'height' then
@@ -1304,6 +1360,7 @@ ashita.events.register('command', 'targetbar_command', function (e)
     elseif sub == 'reset' then
         cfg.width, cfg.height, cfg.y = DEFAULT_WIDTH, DEFAULT_HEIGHT, nil;
         cfg.name_size, cfg.text_size, cfg.icon_size = DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON;
+        cfg.edge_offset = DEFAULT_OFFSET;
         settings.save();
         dirty = false;
         say('Reset.');
