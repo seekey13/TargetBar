@@ -42,7 +42,7 @@ comment above P).
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.3.0';
+addon.version  = '1.3.1';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -105,7 +105,7 @@ local SHORT    = { Slashing = 'Slash', Piercing = 'Pierce', Impact = 'Blunt' };
 -- it sits with aggro (see threat). Same list as Floaties' SENSES.
 local SENSES = { 'TrueSight', 'Sight', 'Sound', 'Scent', 'Magic', 'JA', 'Blood' };
 
--- 1.92 names the flag one way, 1.81 another. Nil rounds every corner.
+-- 1.92 names the flag one way, 1.80 another. Nil rounds every corner.
 local LEFT_CORNERS = ImDrawFlags_RoundCornersLeft or ImDrawCornerFlags_Left;
 
 -- No y: the bar is centered until it is placed (see bar_rect).
@@ -134,16 +134,20 @@ local shown_hpp    = nil;
 local shown_id     = nil;
 local shown_at     = nil;
 
--- Segoe UI, once ImGui can take a font at a size (1.92): semibold for the
--- HUD and the window's title, regular for its labels, semibold italic for
--- its group headings. Until a face is ready, and always on 1.81, each is
--- ImGui's own font scaled to the same pixel size. A face added this frame
--- is not in the atlas yet, so it is drawn from the next frame.
-local fonts         = {};
-local custom        = false;
-local fonts_tried   = false;
-local fonts_pending = nil;
-local dynamic_font  = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200;
+-- Segoe UI: semibold for the HUD and the window's title, regular for its
+-- labels, semibold italic for its group headings. Baked once at BAKE_PX
+-- from the load event, outside any frame, as Chains and Tracker do: adding
+-- to the shared atlas mid-frame can crash 1.80 (Ashita 4.16). 1.92 draws a
+-- face at any size. Before it, a draw list scales the bake, and ImGui's
+-- own widgets take the window's font scale. There the HUD's semibold has
+-- its own bake at HUD_BAKE_PX: its 20 and 25px defaults scale down from
+-- it, which stays sharper than scaling 18 up. Without the files, each is
+-- ImGui's own font scaled to the same pixel size.
+local BAKE_PX      = 18;
+local HUD_BAKE_PX  = 32;
+local fonts        = {};
+local custom       = false;
+local dynamic_font = (tonumber(IMGUI_VERSION_NUM) or 0) >= 19200;
 
 local mob_db   = nil;
 local mob_zone = -1;
@@ -256,7 +260,7 @@ local function u32(hex, alpha)
     return ((a * 256 + b) * 256 + g) * 256 + r;
 end
 
--- (corners nil rounds all four: it isn't passed, as 1.81 reads 0 as none and 1.92 as all.)
+-- (corners nil rounds all four: it isn't passed, as 1.80 reads 0 as none and 1.92 as all.)
 local function fill(dl, x, y, w, h, color, radius, alpha, corners)
     if w <= 0 or h <= 0 then return; end
     local p, q, col = { x, y }, { x + w, y + h }, u32(color, alpha);
@@ -353,23 +357,15 @@ local function smooth(id, hpp)
     return shown_hpp;
 end
 
-local function font_frame()
-    if fonts_pending ~= nil then
-        fonts, fonts_pending, custom = fonts_pending, nil, true;
-        return;
-    end
-    if custom then return; end
-    local own = imgui.GetFont();
-    fonts.text, fonts.semi, fonts.semi_italic = own, own, own;
-    if fonts_tried or not dynamic_font then return; end
-    fonts_tried = true;
+-- Segoe UI from Windows, from the load event. Its faces draw from the first frame.
+local function bake_fonts()
     local dir = ((os.getenv and os.getenv('WINDIR')) or 'C:\\Windows') .. '\\Fonts\\';
-    local function add(file)
+    local function add(file, px)
         local path = dir .. file;
         local handle = io.open(path, 'rb');
         if handle == nil then return nil; end
         handle:close();
-        local ok, loaded = pcall(imgui.AddFontFromFileTTF, path, 18);
+        local ok, loaded = pcall(imgui.AddFontFromFileTTF, path, px or BAKE_PX);
         if ok and loaded then return loaded; end
         return nil;
     end
@@ -378,41 +374,75 @@ local function font_frame()
     local semi_italic = add('seguisbi.ttf') or semi;
     text = text or semi;
     if text ~= nil then
-        fonts_pending = { text = text, semi = semi, semi_italic = semi_italic };
+        local hud = (not dynamic_font and add('seguisb.ttf', HUD_BAKE_PX)) or semi;
+        fonts, custom = { text = text, semi = semi, semi_italic = semi_italic, hud = hud }, true;
     end
+end
+
+-- Without Segoe, every face is ImGui's own.
+local function font_frame()
+    if custom then return; end
+    local own = imgui.GetFont();
+    fonts.text, fonts.semi, fonts.semi_italic, fonts.hud = own, own, own, own;
+end
+
+-- `font` at `px` for ImGui's own widgets, inside a window. Before 1.92
+-- PushFont takes no size: the face goes on at its bake and the window's
+-- font scale makes up the rest. pop_font puts the scale back to 1, as a
+-- tooltip's window is shared with every other addon.
+local function push_font(font, px)
+    if dynamic_font then
+        imgui.PushFont(font, px);
+        return;
+    end
+    imgui.PushFont(font);
+    imgui.SetWindowFontScale(px / BAKE_PX);
+end
+
+local function pop_font()
+    if not dynamic_font then imgui.SetWindowFontScale(1); end
+    imgui.PopFont();
 end
 
 local measured, measured_n = {}, 0;
 
--- Width and height of `text` in `font` at `px`. With Segoe UI in, ImGui
--- measures at that size. Otherwise CalcTextSize is the UI font, scaled by
--- the ratio. Cached: the same strings are measured every frame.
+-- Width and height of `text` in `font` (the HUD's unless given) at `px`.
+-- CalcTextSize measures at the size ImGui has on (px on 1.92, the bake
+-- before it, the UI font's own without Segoe), scaled to px as a draw list
+-- scales a face. That size is GetFontSize's, window font scale and all, so
+-- the ratio holds inside the settings window too. Cached: the same strings
+-- are measured every frame.
 local function measure(text, px, font)
-    font = font or fonts.semi;
+    font = font or fonts.hud;
     text = tostring(text);
     local key = tostring(font) .. '|' .. px .. '|' .. text;
     local m = measured[key];
     if m ~= nil then return m[1], m[2]; end
-    local w, h;
+    local w, h, base;
     if custom and font ~= nil then
         local pushed = false;
-        local ok, a, b = pcall(function ()
-            imgui.PushFont(font, px);
+        local ok, a, b, size = pcall(function ()
+            if dynamic_font then imgui.PushFont(font, px); else imgui.PushFont(font); end
             pushed = true;
             local cw, ch = imgui.CalcTextSize(text);
+            local fs = imgui.GetFontSize();
             imgui.PopFont();
             pushed = false;
-            return cw, ch;
+            return cw, ch, fs;
         end);
         if pushed then pcall(imgui.PopFont); end
-        if ok then w, h = xy(a, b); end
+        if ok then
+            w, h = xy(a, b);
+            base = tonumber(size) or 0;
+            if base <= 0 then base = dynamic_font and px or BAKE_PX; end
+        end
     end
     if w == nil then
         w, h = xy(imgui.CalcTextSize(text));
-        local base = tonumber(imgui.GetFontSize()) or 0;
+        base = tonumber(imgui.GetFontSize()) or 0;
         if base <= 0 then base = 13; end
-        w, h = w * px / base, h * px / base;
     end
+    w, h = w * px / base, h * px / base;
     if measured_n >= 4000 then measured, measured_n = {}, 0; end
     measured[key] = { w, h };
     measured_n = measured_n + 1;
@@ -427,7 +457,7 @@ end
 
 -- Sidekick3's halo: the string in black a pixel out each way, then the fill (white unless given).
 local function halo(dl, x, y, px, text, color)
-    local font = fonts.semi;
+    local font = fonts.hud;
     if font == nil or text == nil or text == '' then return; end
     x, y = math.floor(x + 0.5), math.floor(y + 0.5);
     local dark, ink = u32('#000000', HALO_A), u32(color or '#FFFFFF', 1);
@@ -891,7 +921,8 @@ local function text_spaced(dl, x, cy, s, color, font, px, spacing)
     return x - start - spacing;
 end
 
--- A tooltip by the mouse, in the palette (SetTooltip takes a printf format: its '%' are doubled).
+-- A tooltip by the mouse, in the palette. The face goes on inside the
+-- tooltip's window, as before 1.92 its size is that window's font scale.
 local function tooltip(s)
     if s == nil or s == '' then return; end
     imgui.PushStyleColor(ImGuiCol_PopupBg, rgba(P.popup, 0.97));
@@ -901,9 +932,21 @@ local function tooltip(s)
     imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, S(4));
     imgui.PushStyleVar(ImGuiStyleVar_PopupRounding, S(4));
     imgui.PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1);
-    if custom then imgui.PushFont(fonts.text, S(SMALL + 0.5)); end
-    pcall(imgui.SetTooltip, (tostring(s):gsub('%%', '%%%%')));
-    if custom then imgui.PopFont(); end
+    -- 1.80 returns nothing from BeginTooltip and 1.92 true: open either way.
+    -- Only false skips EndTooltip. A throw in the text still reaches it, or
+    -- the rest of the window would pour into the tooltip.
+    if imgui.BeginTooltip() ~= false then
+        local font_on = false;
+        pcall(function ()
+            if custom then
+                push_font(fonts.text, S(SMALL + 0.5));
+                font_on = true;
+            end
+            imgui.TextUnformatted(tostring(s));
+        end);
+        if font_on then pop_font(); end
+        imgui.EndTooltip();
+    end
     imgui.PopStyleVar(4);
     imgui.PopStyleColor(3);
 end
@@ -945,7 +988,7 @@ local function number_box(id, min, max)
             return;
         end
         if custom then
-            imgui.PushFont(fonts.text, S(SMALL + 1));
+            push_font(fonts.text, S(SMALL + 1));
             font_on = true;
         end
         if buf.focus then imgui.SetKeyboardFocusHere(); buf.focus = false; end
@@ -960,7 +1003,7 @@ local function number_box(id, min, max)
         imgui.TextDisabled(('%d to %d'):format(min, max));
     end);
     if width_on then imgui.PopItemWidth(); end
-    if font_on then imgui.PopFont(); end
+    if font_on then pop_font(); end
     if opened then imgui.EndPopup(); end
     pop_popup_style();
     return got;
@@ -1220,6 +1263,9 @@ local function set_number(key, raw, lo, hi)
     dirty = false;
     report();
 end
+
+-- Between frames, so Segoe can go into the shared atlas (see BAKE_PX).
+ashita.events.register('load', 'targetbar_load', bake_fonts);
 
 ashita.events.register('d3d_present', 'targetbar_present', function ()
     font_frame();
