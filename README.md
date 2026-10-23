@@ -2,11 +2,11 @@
 
 Ashita v4 addon that draws your target's HP% as a bar anchored to the horizontal center of the screen.
 
-The fill is Sidekick3's Vanacore HP red (`#EE6F78`) at 70%. The track behind it is the near-black Sidekick3 uses while you are fighting (`#0C0C0C`) at 70%, with a 1px edge and 4px corners. The number on the bar is the target's current HP%. The fill eases toward that number.
+The fill is Sidekick3's Vanacore HP red (`#EE6F78`) at 70%. The track behind it is the near-black Sidekick3 uses while you are fighting (`#0C0C0C`) at 70%, with a 1px edge and 4px corners. The number on the right end of the bar is the target's current HP%. The fill eases toward that number.
 
-The bar is for mobs and players. Targeting an NPC (a shopkeeper, a door, a Home Point) draws nothing, the rule Floaties uses for its target panel.
+The HP bar is for mobs and players. An NPC (a shopkeeper, a door, a Home Point) has no HP to show, so it gets only its name, in a full pale green (`#C2FFC2`) bar no wider than the name, centered on the screen at the bar's height. There is no HP% on it. With the name hidden, an NPC draws nothing.
 
-The target's name is centered above the bar. It is white over 75% HP, yellow at 75%, orange at 50%, and red at 25%, the colors Sidekick3 gives a name on an HP bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name starts at 25px, the numbers at 20px, and the icons at 32px. Each has a slider. On Ashita 4.16's ImGui 1.80, which bakes a font at one size, each face is baked once and scaled: the HUD's at 32px, the settings window's at 18px. Text well past its bake is a little soft. Without Segoe UI installed, the same sizes are drawn in ImGui's own font.
+The target's name sits inside the bar, on the left. Both the name and the HP% sit the edge offset (8px to start) in from the ends of the bar. A name too long to fit before the HP% is cut short with `...`. The name is white over 75% HP, yellow at 75%, orange at 50%, and red at 25%, the colors Sidekick3 gives a name on an HP bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name starts at 25px, the numbers at 20px, and the icons at 32px. Each has a slider. On Ashita 4.16's ImGui 1.80, which bakes a font at one size, each face is baked once and scaled: the HUD's at 32px, the settings window's at 18px. Text well past its bake is a little soft. Without Segoe UI installed, the same sizes are drawn in ImGui's own font.
 
 Under the bar, a mob shows the damage types it does not take normally. The icons and the order are mobdb's, drawn the way Floaties draws them: weakest damage first (a positive percentage), resistances last, and one percentage on the last icon of each equal group.
 
@@ -30,7 +30,7 @@ The bar starts at 480 by 28, centered on the screen both ways, whatever its size
 
 - Drag the bar up or down. It stays centered.
 - Under Show, Name, HP %, Detection, Weakness, and Resistance each hide that part.
-- Under Text and icons, Name font size and Text font size set the name and the numbers (Sidekick3's ranges, 8 to 64 and 8 to 48 px). Icon size sets the detection and damage icons, 8 to 64 px.
+- Under Text and icons, Name font size and Text font size set the name and the numbers (Sidekick3's ranges, 8 to 64 and 8 to 48 px). Icon size sets the detection and damage icons, 8 to 64 px. Edge offset sets the space between the ends of the bar and the name and HP%, 0 to 64 px. It also sets the padding on each side of an NPC's name.
 - Under Bar, Width, Height, and Y are the sliders. Width goes up to the screen's width. Reset position puts the bar back on the middle of the screen.
 - `/tb` again closes the window. The bar hides when you have no target.
 
@@ -42,7 +42,7 @@ The bar starts at 480 by 28, centered on the screen both ways, whatever its size
 /tb help
 ```
 
-`/targetbar` is the same command. Width is 40 to 5120 px (drawn no wider than the screen), height is 8 to 160 px, and Y is pixels from the top of the screen. `/tb reset` returns the width, the height, and the three text and icon sizes, and centers the bar. The Reset position button centers it only. The toggles are kept.
+`/targetbar` is the same command. Width is 40 to 5120 px (drawn no wider than the screen), height is 8 to 160 px, and Y is pixels from the top of the screen. `/tb reset` returns the width, the height, the three text and icon sizes, and the edge offset, and centers the bar. The Reset position button centers it only. The toggles are kept.
 
 The bar reads the main target (target index 0), the same HP percent HXUI's target bar reads. It does not follow a subtarget.
 
