@@ -2,42 +2,29 @@
 TargetBar - target HP% as a bar centered on the screen.
 Copyright (c) 2026 seekey13. GPL-3.0-or-later, see LICENSE.
 
-The settings window is based on Sidekick3's ui/kit.lua and ui/window.lua,
-which are based on VanaCore's addons/vanacore/vana/draw.lua and vana.lua,
-Copyright (C) 2026 Vekien (GPL-3.0-or-later). TargetBar is not VanaCore,
-and isn't made or endorsed by Vekien; VanaCore's name and logo aren't
-licensed with it.
+UI style: VanaCore by Vekien (Copyright (C) 2026 Vekien, GPL-3.0-or-later).
+TargetBar is not VanaCore, and isn't made or endorsed by Vekien.
 
-The bar matches Sidekick3's HUD HP bar (ui/window.lua, ui/kit.lua):
-rose fill #EE6F78, near-black track #0C0C0C, both at 70%, a 1px #0C0C0C
-edge at 70%, and 4px corners. A partial fill rounds the left end only.
-Sidekick3 tints that track gray while the pointer is over its panel.
-This bar stays on the near-black combat color, so it does not flash when
-the cursor crosses the middle of the screen.
-
-The bar is for mobs and players. An NPC or an object draws nothing.
+The bar is a rose fill #EE6F78 on a near-black #0C0C0C track, both at
+70%, with a 1px #0C0C0C edge and 4px corners. A partial fill rounds the
+left end only. It draws for mobs and players. An NPC or an object draws
+nothing.
 
 The target's name is centered above the bar, white over 75% HP, then
-yellow, orange at 50% and red at 25%, as Sidekick3 colors a name on an HP
-bar. Under it, a mob's damage
+yellow, orange at 50% and red at 25%. Under the bar, a mob's damage
 weakness and resistance: mobdb's icons, strongest first, one percentage
-on the last icon of each equal group. That row is how Floaties draws it
-(lib/mobinfo.lua M.resist, drawn under the panel). Beside the bar, the
-same source's detection (M.threat, M.senses): aggro or passive, then
-Link, on the left, and TrueSight, Sight, Sound, Scent, Magic, JA, Blood
-on the right. The settings window can hide the name, the percent on the
-bar, the detection icons, the weakness icons, and the resistance icons.
-The bar itself stays.
+on the last icon of each equal group. Beside the bar, its detection:
+aggro or passive, then Link, on the left, and TrueSight, Sight, Sound,
+Scent, Magic, JA, Blood on the right. Both rows are built as Floaties'
+lib/mobinfo.lua builds them (M.resist, M.threat, M.senses). The settings
+window can hide the name, the percent on the bar, the detection icons,
+the weakness icons, and the resistance icons. The bar itself stays.
 
-Text is Sidekick3's HUD face (ui/kit.lua): Segoe UI Semibold, a 1px black
-halo at 85%. The name, the numbers and the icons each have a size in the
-settings window, as Sidekick3's HUD has Name and Text font size.
+Text is Segoe UI Semibold over a 1px black halo at 85%. The name, the
+numbers and the icons each have a size in the settings window.
 
 HP comes from the main target, the same read as HXUI's target bar:
 GetTarget():GetTargetIndex(0), then that entity's HP percent.
-
-The settings window is drawn the way Sidekick Settings is (see the
-comment above P).
 ]]--
 
 addon.name     = 'TargetBar';
@@ -63,10 +50,8 @@ local WIDTH_MIN, WIDTH_MAX   = 40, 5120;
 local HEIGHT_MIN, HEIGHT_MAX = 8, 160;
 local Y_MIN, Y_MAX           = 0, 2160;
 
--- Default text sizes are what the author's Sidekick3 HUD is set to
--- (config/addons/Sidekick3/<character>/ui.lua). The ranges are that HUD's
--- Name and Text font size sliders. The icon is Floaties' resist row: its
--- side, and the gap after a group.
+-- Text and icon sizes, and their slider ranges. An icon's size is also the
+-- gap after a damage group.
 local DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON = 25, 20, 32;
 local NAME_MIN, NAME_MAX = 8, 64;
 local TEXT_MIN, TEXT_MAX = 8, 48;
@@ -79,13 +64,12 @@ local BAR_A  = 0.70;
 local RADIUS = 4;
 local EASE   = 12; -- share of the remaining fill covered per second
 
--- Sidekick3 ui/kit.lua draws HUD names in Segoe UI Semibold (seguisb.ttf)
--- and stamps a 1px black halo under the fill.
+-- Text is stamped over a 1px black halo. GAP is the space between the bar
+-- and the text and icons around it.
 local HALO_A  = 0.85;
 local GAP     = 4;
 
--- A name on an HP bar in Sidekick3 (ui/window.lua name_color, kit.P):
--- white over 75%, then yellow, orange at 50% and red at 25%.
+-- The name's color: white over 75% HP, then yellow, orange at 50% and red at 25%.
 local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E8883A', '#E8454E';
 
 local AROUND = {
@@ -102,7 +86,7 @@ local SHORT    = { Slashing = 'Slash', Piercing = 'Pierce', Impact = 'Blunt' };
 
 -- What the mob notices you with, in the order it is worth reading.
 -- TrueSight leads Sight because it supersedes it. Link is not a sense:
--- it sits with aggro (see threat). Same list as Floaties' SENSES.
+-- it sits with aggro (see threat).
 local SENSES = { 'TrueSight', 'Sight', 'Sound', 'Scent', 'Magic', 'JA', 'Blood' };
 
 -- 1.92 names the flag one way, 1.80 another. Nil rounds every corner.
@@ -125,10 +109,8 @@ local defaults = T{
 local cfg = settings.load(defaults);
 
 local config_open  = false;
-local config_state = { true };
 local dirty        = false;
 local drag_origin  = nil;
-local drag_state   = { true };
 local drag_fault   = nil;
 local shown_hpp    = nil;
 local shown_id     = nil;
@@ -173,8 +155,8 @@ local DRAG_FLAGS = flag_set(
 );
 
 -- ImGui draws none of the settings window. NoNavInputs: Tab stays the game's.
--- It is not NoMove: a drag on any empty part of it moves it, as Sidekick
--- Settings does. The controls' invisible buttons take their own presses.
+-- It is not NoMove: a drag on any empty part of it moves it. The controls'
+-- invisible buttons take their own presses.
 local PANEL_FLAGS = flag_set(
     ImGuiWindowFlags_NoTitleBar,
     ImGuiWindowFlags_NoResize,
@@ -241,7 +223,7 @@ local function xy(a, b)
     return tonumber(x) or 0, tonumber(y) or 0;
 end
 
--- The screen's size, 1920 by 1080 until ImGui says (Sidekick3's kit.screen).
+-- The screen's size, 1920 by 1080 until ImGui says.
 local function screen()
     local ok, d = pcall(function () return imgui.GetIO().DisplaySize; end);
     if ok and d ~= nil then
@@ -272,8 +254,8 @@ local function fill(dl, x, y, w, h, color, radius, alpha, corners)
 end
 
 -- Spawn flags: 0x01 a player, 0x10 a mob (trusts and pets carry it too).
--- An NPC (0x02) or an object has neither. Floaties' stats.targetable draws
--- its target panel by the same test: a shopkeeper with an HP bar is noise.
+-- An NPC (0x02) or an object has neither, and gets no bar: a shopkeeper
+-- with an HP bar is noise.
 local function has_flag(flags, bit_)
     return type(flags) == 'number' and bit.band(flags, bit_) ~= 0;
 end
@@ -455,7 +437,7 @@ local function lift(h)
     return math.floor(h * 0.06 + 0.5);
 end
 
--- Sidekick3's halo: the string in black a pixel out each way, then the fill (white unless given).
+-- The halo: the string in black a pixel out each way, then the fill (white unless given).
 local function halo(dl, x, y, px, text, color)
     local font = fonts.hud;
     if font == nil or text == nil or text == '' then return; end
@@ -720,7 +702,7 @@ end
 
 -- Detection, centered on the bar's height. The left group grows left from
 -- one gap off the bar, the right group grows right. Icons in a group sit
--- flush: Floaties' own gap is 0, and the PNGs carry their own padding.
+-- flush: the PNGs carry their own padding.
 -- Neither group changes the bar's width or its place on the screen.
 local function draw_flanks(dl, x, y, w, h, left, right)
     local row_y = math.floor(y + (h - cfg.icon_size) / 2 + 0.5);
@@ -774,9 +756,8 @@ local function drag_y(x, y, w, h)
     imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     imgui.PushStyleVar(ImGuiStyleVar_WindowMinSize, { 1, 1 });
-    drag_state[1] = true;
     local ok, fault = true, nil;
-    if imgui.Begin('TargetBar###targetbar_drag', drag_state, DRAG_FLAGS) then
+    if imgui.Begin('TargetBar###targetbar_drag', true, DRAG_FLAGS) then
         ok, fault = pcall(function ()
             imgui.SetCursorPos({ 0, 0 });
             imgui.InvisibleButton('##targetbar_drag', { w, h });
@@ -806,19 +787,14 @@ local function drag_y(x, y, w, h)
     end
 end
 
--- The settings window is Sidekick Settings' look (Sidekick3's ui/kit.lua
--- and ui/window.lua, after VanaCore's /vana window): one palette, every
+-- The settings window, in VanaCore's style (by Vekien): one palette, every
 -- size through S(), every control drawn on the window's list over an
--- invisible button, its states eased. The sizes are Sidekick Settings':
--- a 44px title bar with the name in semibold 16 and Sidekick3's close mark,
--- small-capital teal group headings, 30px rows with a hover band, 32 by 17
--- switches, 180px sliders, values and buttons at 14, tooltips at 14, and
--- notes at 14 in 22px lines. The card is XPBar's width.
+-- invisible button, its states eased.
 local P = {
-    bg = '#161822', border = '#2A2E3E', line = '#242838', hover = '#1F2334',
+    bg = '#161822', border = '#2A2E3E', hover = '#1F2334',
     well = '#0E1017', well_edge = '#272B3C', popup = '#0F1118',
     white = '#FFFFFF', text = '#E8EAF1', text2 = '#BDC1D0', dim = '#7B8095', faint = '#4E536A',
-    accent = '#7AA2F7', accent2 = '#A9C1FF', accent_lo = '#3E5CB3', accent_bg = '#1B2340',
+    accent = '#7AA2F7', accent2 = '#A9C1FF', accent_lo = '#3E5CB3',
     teal = '#5FD3B3', rose = '#EE6F78', knob = '#F2F3F8', off = '#2B2F42',
 };
 local BODY, SMALL = 16, 13.5;
@@ -834,7 +810,7 @@ local function S(n) return math.floor(n * scale + 0.5); end
 
 -- Once a frame the window is drawn: the time since the last (capped, so a
 -- hitch takes one step), and the scale: 1440 pixels tall is 1, held between
--- 0.75 and 1.6, then the 1.1 Sidekick Settings uses.
+-- 0.75 and 1.6, then times 1.1.
 local function tick()
     local now = os.clock();
     panel_dt = panel_at and math.max(0, math.min(0.1, now - panel_at)) or 0;
@@ -889,28 +865,28 @@ local function over(x, y, w, h)
     return ok and yes == true;
 end
 
-local function text_at(dl, x, y, s, color, font, px, alpha)
-    dl:AddText(font, px, { math.floor(x + 0.5), math.floor(y + 0.5) }, u32(color, alpha), s);
+local function text_at(dl, x, y, s, color, font, px)
+    dl:AddText(font, px, { math.floor(x + 0.5), math.floor(y + 0.5) }, u32(color), s);
 end
 
 -- Text with its middle at cy: from x, ending at `right`, or centred on cx.
-local function text_mid(dl, x, cy, s, color, font, px, alpha)
+local function text_mid(dl, x, cy, s, color, font, px)
     local _, h = measure(s, px, font);
-    text_at(dl, x, cy - h / 2 - lift(h), s, color, font, px, alpha);
+    text_at(dl, x, cy - h / 2 - lift(h), s, color, font, px);
 end
 
-local function text_right(dl, right, cy, s, color, font, px, alpha)
+local function text_right(dl, right, cy, s, color, font, px)
     local w, h = measure(s, px, font);
-    text_at(dl, right - w, cy - h / 2 - lift(h), s, color, font, px, alpha);
+    text_at(dl, right - w, cy - h / 2 - lift(h), s, color, font, px);
 end
 
-local function text_centred(dl, cx, cy, s, color, font, px, alpha)
+local function text_centred(dl, cx, cy, s, color, font, px)
     local w, h = measure(s, px, font);
-    text_at(dl, cx - w / 2, cy - h / 2 - lift(h), s, color, font, px, alpha);
+    text_at(dl, cx - w / 2, cy - h / 2 - lift(h), s, color, font, px);
 end
 
 -- Capitals one glyph at a time, `spacing` pixels apart (ImGui has no
--- tracking): Sidekick3's group headings. Returns the width.
+-- tracking), for group headings. Returns the width.
 local function text_spaced(dl, x, cy, s, color, font, px, spacing)
     local start = x;
     for letter in s:gmatch('.') do
@@ -930,7 +906,6 @@ local function tooltip(s)
     imgui.PushStyleColor(ImGuiCol_Text, rgba(P.text));
     imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { S(9), S(6) });
     imgui.PushStyleVar(ImGuiStyleVar_WindowRounding, S(4));
-    imgui.PushStyleVar(ImGuiStyleVar_PopupRounding, S(4));
     imgui.PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1);
     -- 1.80 returns nothing from BeginTooltip and 1.92 true: open either way.
     -- Only false skips EndTooltip. A throw in the text still reaches it, or
@@ -947,15 +922,13 @@ local function tooltip(s)
         if font_on then pop_font(); end
         imgui.EndTooltip();
     end
-    imgui.PopStyleVar(4);
+    imgui.PopStyleVar(3);
     imgui.PopStyleColor(3);
 end
 
 local POPUP_COLOURS = {
     { ImGuiCol_PopupBg, rgba(P.popup) }, { ImGuiCol_Border, rgba(P.border) }, { ImGuiCol_Text, rgba(P.text) },
-    { ImGuiCol_Header, rgba(P.accent_bg) }, { ImGuiCol_HeaderHovered, rgba(P.hover) },
-    { ImGuiCol_HeaderActive, rgba(P.accent_lo) }, { ImGuiCol_Separator, rgba(P.line) },
-    { ImGuiCol_FrameBg, rgba(P.well) }, { ImGuiCol_FrameBgHovered, rgba(P.well) }, { ImGuiCol_FrameBgActive, rgba(P.well) },
+    { ImGuiCol_FrameBg, rgba(P.well) },
 };
 
 -- ImGui's own popups (a typed number) in the palette, with the padding and
@@ -1009,9 +982,9 @@ local function number_box(id, min, max)
     return got;
 end
 
--- A whole-number slider, `w` wide: the track, then the value (`unit` after
--- it). A click on the value opens a box to type one.
-local function slider(id, x, cy, w, value, min, max, unit)
+-- A whole-number slider, `w` wide: the track, then the value in px. A
+-- click on the value opens a box to type one.
+local function slider(id, x, cy, w, value, min, max)
     local dl = imgui.GetWindowDrawList();
     local value_w = S(52);
     local track = w - value_w - S(10);
@@ -1033,7 +1006,7 @@ local function slider(id, x, cy, w, value, min, max, unit)
     local vx = x + track + S(10);
     local vhov, vclick = hit(id .. '.value', vx, cy - S(10), value_w, S(20));
     if vhov then fill(dl, vx, cy - S(10), value_w, S(20), P.hover, S(3)); end
-    text_right(dl, vx + value_w - S(4), cy, tostring(value) .. (unit or ''), P.text2, fonts.text, S(SMALL + 0.5));
+    text_right(dl, vx + value_w - S(4), cy, tostring(value) .. 'px', P.text2, fonts.text, S(SMALL + 0.5));
     if vclick then
         typed[id] = { tostring(value), focus = true };
         imgui.OpenPopup(id .. '.number');
@@ -1078,7 +1051,7 @@ local function button(id, x, cy, label)
     return clicked;
 end
 
--- Sidekick3's close mark: an X, `box` square, the cross 0.72 of it, dim
+-- The close mark: an X, `box` square, the cross 0.72 of it, dim
 -- until the pointer is on it, then rose. Returns clicked, hovered.
 local function close_mark(id, cx, cy, box)
     local hovered, clicked = hit(id, cx - box / 2, cy - box / 2, box, box);
@@ -1095,7 +1068,7 @@ end
 --[[ pg: where the rows go, top to bottom: { dl, x, w, y (the next row's top),
      lx (where labels start), right (where controls end) }. ]]--
 
--- A group's heading: Sidekick3's small capitals in teal, a line after.
+-- A group's heading: small capitals in teal, a line after.
 local function subheader(pg, s)
     pg.y = pg.y + S(8);
     local cy = pg.y + S(12);
@@ -1120,9 +1093,9 @@ local function line(pg, label, help, h)
     return cy;
 end
 
--- A line of text in a 22px line.
-local function note(pg, s, color)
-    text_mid(pg.dl, pg.lx, pg.y + S(11), s, color or P.dim, fonts.text, S(SMALL + 0.5));
+-- A faint line of text in a 22px line.
+local function note(pg, s)
+    text_mid(pg.dl, pg.lx, pg.y + S(11), s, P.faint, fonts.text, S(SMALL + 0.5));
     pg.y = pg.y + S(22);
 end
 
@@ -1157,7 +1130,7 @@ end
 -- A labelled slider row that writes cfg[key].
 local function slider_row(pg, row, value, min, max)
     local cy = line(pg, row[1], row[4]);
-    local v, moved = slider(row[2], pg.right - S(SLIDER_W), cy, S(SLIDER_W), value, min, max, 'px');
+    local v, moved = slider(row[2], pg.right - S(SLIDER_W), cy, S(SLIDER_W), value, min, max);
     if moved and v ~= cfg[row[3]] then
         cfg[row[3]] = v;
         dirty = true;
@@ -1181,9 +1154,8 @@ local function draw_config(has_target)
     imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     imgui.PushStyleVar(ImGuiStyleVar_ItemSpacing, { 0, 0 });
-    config_state[1] = true;
     local drew, fault = true, nil;
-    if imgui.Begin('TargetBar###tb_settings', config_state, PANEL_FLAGS) then
+    if imgui.Begin('TargetBar###tb_settings', true, PANEL_FLAGS) then
         drew, fault = pcall(function ()
             local wx, wy = xy(imgui.GetCursorScreenPos());
             local x, y = wx + m, wy + m;
@@ -1225,7 +1197,7 @@ local function draw_config(has_target)
             end
             if imgui.IsItemHovered() then tooltip('Back to the middle of the screen.'); end
             note(pg, has_target and 'Drag the bar up or down. It stays centered.'
-                or 'No target: a preview shows where it goes.', P.faint);
+                or 'No target: a preview shows where it goes.');
         end);
     end
     imgui.End();
@@ -1236,7 +1208,6 @@ local function draw_config(has_target)
         panel_fault = fault;
         say('Settings window: ' .. tostring(fault));
     end
-    if config_state[1] == false then config_open = false; end
 end
 
 local function save_if_idle()
