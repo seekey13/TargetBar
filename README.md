@@ -6,7 +6,7 @@ The fill is Sidekick3's Vanacore HP red (`#EE6F78`) at 70%. The track behind it 
 
 The bar is for mobs and players. Targeting an NPC (a shopkeeper, a door, a Home Point) draws nothing, the rule Floaties uses for its target panel.
 
-The target's name is centered above the bar. It is white over 75% HP, yellow at 75%, orange at 50%, and red at 25%, the colors Sidekick3 gives a name on an HP bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name starts at 25px, the numbers at 20px, and the icons at 32px. Each has a slider. On an older ImGui the same sizes are drawn in ImGui's own font.
+The target's name is centered above the bar. It is white over 75% HP, yellow at 75%, orange at 50%, and red at 25%, the colors Sidekick3 gives a name on an HP bar. Text uses Sidekick3's HUD face, Segoe UI Semibold, with the same 1px black halo. The name starts at 25px, the numbers at 20px, and the icons at 32px. Each has a slider. On Ashita 4.16's ImGui 1.80, which bakes a font at one size, Segoe is baked at 18px and scaled, so text well past that is a little soft. Without Segoe UI installed, the same sizes are drawn in ImGui's own font.
 
 Under the bar, a mob shows the damage types it does not take normally. The icons and the order are mobdb's, drawn the way Floaties draws them: weakest damage first (a positive percentage), resistances last, and one percentage on the last icon of each equal group.
 
