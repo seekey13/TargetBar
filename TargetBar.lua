@@ -24,10 +24,10 @@ the weakness icons, the resistance icons, and the bar for the target's
 target. The bar itself stays.
 
 Locked on (the game's Notice), a transparent red stroke sits around the
-bar, softer a few pixels out. "Locked" is drawn with those same passes,
-centred just above the bar: no black halo, the word at the border's own
-alpha and a fainter copy at each step of the fringe. The fringe stops at
-the gap the detection icons start in, so it does not cover them.
+bar, softer a few pixels out. "Locked" is LOCK_TEXT, centred just above
+the bar, and its outline is that same fringe: a fainter red copy of the
+word at each step, then the letters on top. The fringe stops at the gap
+the detection icons start in, so it does not cover them.
 
 To the right of the bar, a second bar shows who that target is targeting.
 The name is on the left and the HP% is on the right, in the same colours,
@@ -80,7 +80,7 @@ local TEXT_MIN, TEXT_MAX = 8, 48;
 local ICON_MIN, ICON_MAX = 8, 64;
 local OFFSET_MIN, OFFSET_MAX = 0, 64;
 
-local FILL   = '#EE6F78';
+local FILL   = '#ee6f78';
 local TRACK  = '#0C0C0C';
 local EDGE   = '#0C0C0C';
 local BAR_A  = 0.70;
@@ -98,11 +98,13 @@ local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E
 -- An NPC's bar: its name in pale green on black at 40%.
 local NPC_TEXT, PLATE, PLATE_A = '#C2FFC2', '#000000', 0.40;
 
--- Lock-on. One red for the stroke and the word: the mock's hot edge is
--- about #FF4A40, and the fringe is that red gone transparent, not a second
--- colour. The reach is the gap beside the bar (see GAP). The second bar
--- starts past that fringe, then one gap, so the stroke does not cover it.
+-- Lock-on. LOCK is the fringe on the bar and around the word. LOCK_TEXT
+-- is the letters, its own colour so it can be tried apart from the name.
+-- The fringe is that red gone transparent, not a second colour. The reach
+-- is the gap beside the bar (see GAP). The second bar starts past that
+-- fringe, then one gap, so the stroke does not cover it.
 local LOCK = '#FF4A40';
+local LOCK_TEXT = '#ffb4b4';
 local LOCK_REACH = 4;
 local TOT_GAP = LOCK_REACH + GAP;
 local LOCK_GLOW = {
@@ -919,11 +921,10 @@ local function draw_lock(dl, x, y, w, h)
     end
 end
 
--- "Locked" the way the frame is drawn: each fringe step is a fainter copy
--- of the word, and the last pass is the word at the border's alpha. The
--- box sits 1px above the bar, so the fringe meets the stroke. The text
--- size is the numbers' size. Drawn after the icons so a tall one does not
--- cover it.
+-- "Locked" in LOCK_TEXT. The outline is the frame's fringe: a fainter red
+-- copy of the word at each step, then the letters on top. The box sits
+-- 1px above the bar, so the glow meets the stroke. The text size is the
+-- numbers' size. Drawn after the icons so a tall one does not cover it.
 local function draw_locked(dl, x, y, w)
     local font = fonts.hud;
     if font == nil then return; end
@@ -934,15 +935,14 @@ local function draw_locked(dl, x, y, w)
     local ty = math.floor(y - 1 - th + 0.5);
     for i = 1, #LOCK_GLOW do
         local e, a = LOCK_GLOW[i][1], LOCK_GLOW[i][2];
-        local col = u32(LOCK, a);
-        if e == 0 then
-            dl:AddText(font, px, { tx, ty }, col, text);
-        else
+        if e > 0 then
+            local col = u32(LOCK, a);
             for _, o in ipairs(AROUND) do
                 dl:AddText(font, px, { tx + o[1] * e, ty + o[2] * e }, col, text);
             end
         end
     end
+    dl:AddText(font, px, { tx, ty }, u32(LOCK_TEXT, 1), text);
 end
 
 -- An NPC's bar: the background alone, PLATE at PLATE_A, cornered as the bar is.

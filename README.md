@@ -16,7 +16,7 @@ A target mobdb does not know, a player, or a trust in your party shows the name 
 
 The settings window can hide the name, the percent on the bar, the detection icons, the weakness icons, the resistance icons, and the target's target. The bar itself stays. Detection is on until you hide it. The target's target is on until you hide it.
 
-Locked on, a transparent red fringe (`#FF4A40`) outlines the bar, softer a few pixels out. The word Locked sits just above it, drawn the same way: that red, at the fringe's alphas, with no black halo.
+Locked on, a transparent red fringe (`#FF4A40`) outlines the bar, softer a few pixels out. The word Locked sits just above it in `#ffb4b4`, with that same red fringe as its outline.
 
 To the right of the bar, a second bar shows who your target is targeting: the name on the left, the HP% on the right, in the same colours and at the same edge offset. It is the same height as the bar, unless the name or the percent is taller, in which case it grows so that line sits inside it. Its width starts at 280. It never draws narrower than the name and `100%` on one line, so a long name widens it and neither is cut short. The client reads that target from the entity (`TargetedIndex`). It is empty when your target has none, and it is not filled in for you.
 
