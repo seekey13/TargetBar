@@ -10,13 +10,17 @@ The target's name sits inside the bar, on the left. Both the name and the HP% si
 
 Under the bar, a mob shows the damage types it does not take normally. The icons and the order are mobdb's, drawn the way Floaties draws them: weakest damage first (a positive percentage), resistances last, and one percentage on the last icon of each equal group.
 
-Beside the bar, a mob shows what it notices, in the order Floaties uses. On the left, aggro or passive, then Link when it links. Aggro and passive always draw: a mob that does not aggro is not the same as a mob with no data. A notorious monster uses the gold-framed icon. On the right, whichever of TrueSight, Sight, Sound, Scent, Magic, JA, and Blood it has, in that order. The groups sit one gap off the bar and grow outward, so the bar stays centered.
+Beside the bar, a mob shows what it notices, in the order Floaties uses. On the left, aggro or passive, then Link when it links. Aggro and passive always draw: a mob that does not aggro is not the same as a mob with no data. A notorious monster uses the gold-framed icon. On the right, whichever of TrueSight, Sight, Sound, Scent, Magic, JA, and Blood it has, in that order. The groups sit one gap off the bar and grow outward, so the bar stays centered. When the target's target is shown, the right group starts one gap past that bar.
 
 A target mobdb does not know, a player, or a trust in your party shows the name and the HP% only. (A trust carries the game's mob flag, and a few share a name with a battlefield's mob.) The icons need `addons/mobdb`. Without it, the name and the bar still draw.
 
-The settings window can hide the name, the percent on the bar, the detection icons, the weakness icons, and the resistance icons. The bar itself stays. Detection is on until you hide it.
+The settings window can hide the name, the percent on the bar, the detection icons, the weakness icons, the resistance icons, and the target's target. The bar itself stays. Detection is on until you hide it. The target's target is on until you hide it.
 
-The bar starts at 480 by 28, centered on the screen both ways, whatever its size. Width, height, and Y are saved per character. Until you move it, Y follows the screen's center. X is always the center of the display.
+Locked on, a transparent red fringe (`#FF4A40`) outlines the bar, softer a few pixels out. The word Locked sits just above it, drawn the same way: that red, at the fringe's alphas, with no black halo.
+
+To the right of the bar, a second bar shows who your target is targeting: the name on the left, the HP% on the right, in the same colours and at the same edge offset. It is the same height as the bar, unless the name or the percent is taller, in which case it grows so that line sits inside it. Its width starts at 280. It never draws narrower than the name and `100%` on one line, so a long name widens it and neither is cut short. The client reads that target from the entity (`TargetedIndex`). It is empty when your target has none, and it is not filled in for you.
+
+The bar starts at 480 by 28, centered on the screen both ways, whatever its size. Width, height, Y, and the target-of-target width are saved per character. Until you move it, Y follows the screen's center. X is always the center of the display. The second bar does not move that center: it hangs off the right.
 
 ## Load
 
@@ -26,25 +30,26 @@ The bar starts at 480 by 28, centered on the screen both ways, whatever its size
 
 ## Place it
 
-`/tb` opens the settings window and, until you target something, a full bar, the name "Target", and sample icons so you can see the layout. Detection shows aggro, Link, TrueSight, Sight, and Sound. Weakness shows `Fire +25%` and `Ice -50%`. Those parts follow the toggles. The window is drawn the way Sidekick3's Sidekick Settings is (`ui/kit.lua`, after VanaCore's `/vana` window): the same palette, Segoe UI faces, scale, title bar, close mark, group headings, switches, sliders, button, and tooltips, on a card XPBar's width. Drag any empty part of it to move it. Click a slider's number to type one.
+`/tb` opens the settings window and, until you target something, a full bar, the name "Target", a second bar with the same name and 100%, and sample icons so you can see the layout. Detection shows aggro, Link, TrueSight, Sight, and Sound. Weakness shows `Fire +25%` and `Ice -50%`. Those parts follow the toggles. The window is drawn the way Sidekick3's Sidekick Settings is (`ui/kit.lua`, after VanaCore's `/vana` window): the same palette, Segoe UI faces, scale, title bar, close mark, group headings, switches, sliders, button, and tooltips, on a card XPBar's width. Drag any empty part of it to move it. Click a slider's number to type one.
 
-- Drag the bar up or down. It stays centered.
-- Under Show, Name, HP %, Detection, Weakness, and Resistance each hide that part.
-- Under Text and icons, Name font size and Text font size set the name and the numbers (Sidekick3's ranges, 8 to 64 and 8 to 48 px). Icon size sets the detection and damage icons, 8 to 64 px. Edge offset sets the space between the ends of the bar and the name and HP%, 0 to 64 px. It also sets the padding on each side of an NPC's name.
-- Under Bar, Width, Height, and Y are the sliders. Width goes up to the screen's width. Reset position puts the bar back on the middle of the screen.
+- Drag the bar up or down. It stays centered. The second bar moves with it.
+- Under Show, Name, HP %, Detection, Weakness, Resistance, and Target of target each hide that part. The second bar always draws its own name and HP%.
+- Under Text and icons, Name font size and Text font size set the name and the numbers (Sidekick3's ranges, 8 to 64 and 8 to 48 px). Icon size sets the detection and damage icons, 8 to 64 px. Edge offset sets the space between the ends of the bar and the name and HP%, 0 to 64 px. It also sets the padding on each side of an NPC's name, and on the second bar.
+- Under Bar, Width, Height, Y, and Target of target are the sliders. Width goes up to the screen's width. Target of target cannot go below the name and the HP% on one line. Reset position puts the bar back on the middle of the screen.
 - `/tb` again closes the window. The bar hides when you have no target.
 
 ```
 /tb width <px>
+/tb totwidth <px>
 /tb height <px>
 /tb y <px>
 /tb reset
 /tb help
 ```
 
-`/targetbar` is the same command. Width is 40 to 5120 px (drawn no wider than the screen), height is 8 to 160 px, and Y is pixels from the top of the screen. `/tb reset` returns the width, the height, the three text and icon sizes, and the edge offset, and centers the bar. The Reset position button centers it only. The toggles are kept.
+`/targetbar` is the same command. Width and the target-of-target width are 40 to 5120 px (the main bar is drawn no wider than the screen). The second bar still widens past that setting when its name and HP% need the room. Height is 8 to 160 px, and Y is pixels from the top of the screen. `/tb reset` returns the width, the target-of-target width, the height, the three text and icon sizes, and the edge offset, and centers the bar. The Reset position button centers it only. The toggles are kept.
 
-The bar reads the main target (target index 0), the same HP percent HXUI's target bar reads. It does not follow a subtarget.
+The bar reads the main target (target index 0), the same HP percent HXUI's target bar reads. The second bar reads who that target is targeting. It does not follow a subtarget.
 
 ## Licence
 

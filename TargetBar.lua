@@ -20,7 +20,23 @@ aggro or passive, then Link, on the left, and TrueSight, Sight, Sound,
 Scent, Magic, JA, Blood on the right. Both rows are built as Floaties'
 lib/mobinfo.lua builds them (M.resist, M.threat, M.senses). The settings
 window can hide the name, the percent on the bar, the detection icons,
-the weakness icons, and the resistance icons. The bar itself stays.
+the weakness icons, the resistance icons, and the bar for the target's
+target. The bar itself stays.
+
+Locked on (the game's Notice), a transparent red stroke sits around the
+bar, softer a few pixels out. "Locked" is drawn with those same passes,
+centred just above the bar: no black halo, the word at the border's own
+alpha and a fainter copy at each step of the fringe. The fringe stops at
+the gap the detection icons start in, so it does not cover them.
+
+To the right of the bar, a second bar shows who that target is targeting.
+The name is on the left and the HP% is on the right, in the same colours,
+at the same edge offset. Its width is a setting. It never draws narrower
+than that name and the percent on one line, and no shorter than that
+line, so both sit inside it. Senses
+sit one gap past it. The client keeps that target on the entity
+(TargetedIndex). It is empty when there is none, and it is not filled in
+for the local player.
 
 Text is Segoe UI Semibold over a 1px black halo at 85%. The name, the
 numbers and the icons each have a size in the settings window.
@@ -31,7 +47,7 @@ GetTarget():GetTargetIndex(0), then that entity's HP percent.
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.3.1';
+addon.version  = '1.4.0';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -45,8 +61,11 @@ local d3d_ok, d3d = pcall(require, 'd3d8');
 local textures = ffi_ok and d3d_ok;
 
 -- A 480x28 bar. Until it is placed, it sits on the vertical center of the screen.
+-- The target's target starts at 280, wide enough for a short name and the
+-- percent. A longer name widens the bar (see tot_need).
 local DEFAULT_WIDTH  = 480;
 local DEFAULT_HEIGHT = 28;
+local DEFAULT_TOT    = 280;
 
 local WIDTH_MIN, WIDTH_MAX   = 40, 5120;
 local HEIGHT_MIN, HEIGHT_MAX = 8, 160;
@@ -78,6 +97,21 @@ local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E
 
 -- An NPC's bar: its name in pale green on black at 40%.
 local NPC_TEXT, PLATE, PLATE_A = '#C2FFC2', '#000000', 0.40;
+
+-- Lock-on. One red for the stroke and the word: the mock's hot edge is
+-- about #FF4A40, and the fringe is that red gone transparent, not a second
+-- colour. The reach is the gap beside the bar (see GAP). The second bar
+-- starts past that fringe, then one gap, so the stroke does not cover it.
+local LOCK = '#FF4A40';
+local LOCK_REACH = 4;
+local TOT_GAP = LOCK_REACH + GAP;
+local LOCK_GLOW = {
+    { 4, 0.14 },
+    { 3, 0.22 },
+    { 2, 0.34 },
+    { 1, 0.50 },
+    { 0, 0.72 },
+};
 
 local AROUND = {
     { -1, -1 }, { 0, -1 }, { 1, -1 },
@@ -112,6 +146,8 @@ local defaults = T{
     show_detection = true,
     show_weakness = true,
     show_resistance = true,
+    show_tot = true,
+    tot_width = DEFAULT_TOT,
 };
 
 local cfg = settings.load(defaults);
@@ -120,9 +156,8 @@ local config_open  = false;
 local dirty        = false;
 local drag_origin  = nil;
 local drag_fault   = nil;
-local shown_hpp    = nil;
-local shown_id     = nil;
-local shown_at     = nil;
+local main_fill = { hpp = nil, id = nil, at = nil };
+local tot_fill  = { hpp = nil, id = nil, at = nil };
 
 -- Segoe UI: semibold for the HUD and the window's title, regular for its
 -- labels, semibold italic for its group headings. Baked once at BAKE_PX
@@ -213,6 +248,8 @@ local function sanitize()
     cfg.show_detection = on_unless_off(cfg.show_detection);
     cfg.show_weakness = on_unless_off(cfg.show_weakness);
     cfg.show_resistance = on_unless_off(cfg.show_resistance);
+    cfg.show_tot = on_unless_off(cfg.show_tot);
+    cfg.tot_width = clamp(cfg.tot_width, WIDTH_MIN, WIDTH_MAX, DEFAULT_TOT);
 end
 
 sanitize();
@@ -311,72 +348,133 @@ local function is_trust(entities, index, sid)
     return in_party(sid);
 end
 
--- The main target. Index 0 is "no target". HXUI reads this same index and
--- HPPercent. `npc` is neither a mob, a player, a pet, nor a trust. Flags
--- that cannot be read keep the bar: an unknown is not taken for an NPC.
+-- One entity, by index. `npc` is neither a mob, a player, a pet, nor a trust.
+-- Flags that cannot be read keep the bar: an unknown is not taken for an NPC.
+local function entity_info(index)
+    if type(index) ~= 'number' or index <= 0 or index > 2303 then return nil; end
+    index = math.floor(index);
+    local mm = AshitaCore:GetMemoryManager();
+    if mm == nil then return nil; end
+
+    local name, hpp, sid, flags;
+    if type(GetEntity) == 'function' then
+        local ent_ok, ent = pcall(GetEntity, index);
+        if ent_ok and ent ~= nil then
+            name = ent.Name;
+            hpp  = ent.HPPercent;
+            sid  = ent.ServerId;
+            local flags_ok, read = pcall(function () return ent.SpawnFlags; end);
+            if flags_ok then flags = tonumber(read); end
+        end
+    end
+    local entities = mm:GetEntity();
+    if type(name) ~= 'string' or name == '' or hpp == nil then
+        if entities == nil then return nil; end
+        name = entities:GetName(index);
+        hpp  = entities:GetHPPercent(index);
+        sid  = entities:GetServerId(index);
+    end
+    if flags == nil and entities ~= nil and type(entities.GetSpawnFlags) == 'function' then
+        local flags_ok, read = pcall(function () return entities:GetSpawnFlags(index); end);
+        if flags_ok then flags = tonumber(read); end
+    end
+    if type(name) ~= 'string' or name == '' then return nil; end
+    local mob = has_flag(flags, 0x10);
+    hpp = tonumber(hpp) or 0;
+    if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
+    if sid == nil or sid == 0 then sid = index; end
+    local npc = flags ~= nil and not mob and not has_flag(flags, 0x01)
+        and not is_trust(entities, index, sid)
+        and not (entities ~= nil and is_pet(entities, index, sid));
+    mob = mob and not in_party(sid);
+    return { id = sid, hpp = hpp, name = name, index = index, mob = mob, npc = npc };
+end
+
+-- The main target. Index 0 is "no target". HXUI reads this same index and HPPercent.
 local function read_target()
     local ok, found = pcall(function ()
         local mm = AshitaCore:GetMemoryManager();
         if mm == nil then return nil; end
         local target = mm:GetTarget();
         if target == nil then return nil; end
-        local index = target:GetTargetIndex(0);
-        if type(index) ~= 'number' or index <= 0 or index > 2303 then return nil; end
-        index = math.floor(index);
-
-        local name, hpp, sid, flags;
-        if type(GetEntity) == 'function' then
-            local ent_ok, ent = pcall(GetEntity, index);
-            if ent_ok and ent ~= nil then
-                name = ent.Name;
-                hpp  = ent.HPPercent;
-                sid  = ent.ServerId;
-                local flags_ok, read = pcall(function () return ent.SpawnFlags; end);
-                if flags_ok then flags = tonumber(read); end
-            end
-        end
-        local entities = mm:GetEntity();
-        if type(name) ~= 'string' or name == '' or hpp == nil then
-            if entities == nil then return nil; end
-            name = entities:GetName(index);
-            hpp  = entities:GetHPPercent(index);
-            sid  = entities:GetServerId(index);
-        end
-        if flags == nil and entities ~= nil and type(entities.GetSpawnFlags) == 'function' then
-            local flags_ok, read = pcall(function () return entities:GetSpawnFlags(index); end);
-            if flags_ok then flags = tonumber(read); end
-        end
-        if type(name) ~= 'string' or name == '' then return nil; end
-        local mob = has_flag(flags, 0x10);
-        hpp = tonumber(hpp) or 0;
-        if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
-        if sid == nil or sid == 0 then sid = index; end
-        local npc = flags ~= nil and not mob and not has_flag(flags, 0x01)
-            and not is_trust(entities, index, sid)
-            and not (entities ~= nil and is_pet(entities, index, sid));
-        mob = mob and not in_party(sid);
-        return { id = sid, hpp = hpp, name = name, index = index, mob = mob, npc = npc };
+        return entity_info(target:GetTargetIndex(0));
     end);
     if ok then return found; end
     return nil;
 end
 
+-- Who this entity is targeting. TargetedIndex is the client's copy. It is 0
+-- with no target, and the local player's is left empty.
+local function targeted_index(index)
+    local tot;
+    if type(GetEntity) == 'function' then
+        local ent_ok, ent = pcall(GetEntity, index);
+        if ent_ok and ent ~= nil then tot = tonumber(ent.TargetedIndex); end
+    end
+    if tot == nil or tot <= 0 then
+        local mm = AshitaCore:GetMemoryManager();
+        local entities = mm ~= nil and mm:GetEntity() or nil;
+        if entities ~= nil and type(entities.GetTargetedIndex) == 'function' then
+            local read_ok, read = pcall(function () return entities:GetTargetedIndex(index); end);
+            if read_ok then tot = tonumber(read); end
+        end
+    end
+    return tot;
+end
+
+-- The target's target. The same entity twice is not a second bar.
+local function read_tot(target)
+    if target == nil or type(target.index) ~= 'number' then return nil; end
+    local ok, found = pcall(function ()
+        local tot = targeted_index(target.index);
+        if tot == nil then return nil; end
+        tot = math.floor(tot);
+        if tot <= 0 or tot > 2303 or tot == target.index then return nil; end
+        return entity_info(tot);
+    end);
+    if ok then return found; end
+    return nil;
+end
+
+-- True while the main target is locked on. The game calls that Notice.
+-- GetIsLockedOn is the direct read where this client has it; otherwise
+-- LockedOnFlags bit 0, the same fallback XIUI uses. A miss is not locked.
+local function target_locked()
+    local ok, yes = pcall(function ()
+        local mm = AshitaCore:GetMemoryManager();
+        if mm == nil then return false; end
+        local target = mm:GetTarget();
+        if target == nil then return false; end
+        if type(target.GetIsLockedOn) == 'function' then
+            local locked = target:GetIsLockedOn();
+            return locked == 1 or locked == true;
+        end
+        if type(target.GetLockedOnFlags) ~= 'function' then return false; end
+        return bit.band(tonumber(target:GetLockedOnFlags()) or 0, 0x01) ~= 0;
+    end);
+    return ok and yes == true;
+end
+
 -- Ease the fill toward `hpp`. A new id snaps, so a new target does not drain from the last one.
-local function smooth(id, hpp)
+local function smooth(state, id, hpp)
     local now = os.clock();
     local dt = 0;
-    if shown_at ~= nil then
-        dt = now - shown_at;
+    if state.at ~= nil then
+        dt = now - state.at;
         if dt < 0 then dt = 0; elseif dt > 0.1 then dt = 0.1; end
     end
-    shown_at = now;
-    if shown_hpp == nil or shown_id ~= id then
-        shown_hpp, shown_id = hpp, id;
+    state.at = now;
+    if state.hpp == nil or state.id ~= id then
+        state.hpp, state.id = hpp, id;
         return hpp;
     end
-    shown_hpp = shown_hpp + (hpp - shown_hpp) * math.min(1, dt * EASE);
-    if math.abs(shown_hpp - hpp) < 0.05 then shown_hpp = hpp; end
-    return shown_hpp;
+    state.hpp = state.hpp + (hpp - state.hpp) * math.min(1, dt * EASE);
+    if math.abs(state.hpp - hpp) < 0.05 then state.hpp = hpp; end
+    return state.hpp;
+end
+
+local function clear_fill(state)
+    state.hpp, state.id = nil, nil;
 end
 
 -- Segoe UI from Windows, from the load event. Its faces draw from the first frame.
@@ -769,10 +867,11 @@ local function draw_resists(dl, x, y, w, h, segments)
 end
 
 -- Detection, centered on the bar's height. The left group grows left from
--- one gap off the bar, the right group grows right. Icons in a group sit
--- flush: the PNGs carry their own padding.
+-- one gap off the bar, the right group grows right from the bar, or from
+-- `right_at` when the target's target takes that side. Icons in a group
+-- sit flush: the PNGs carry their own padding.
 -- Neither group changes the bar's width or its place on the screen.
-local function draw_flanks(dl, x, y, w, h, left, right)
+local function draw_flanks(dl, x, y, w, h, left, right, right_at)
     local row_y = math.floor(y + (h - cfg.icon_size) / 2 + 0.5);
     if left ~= nil and #left > 0 then
         local width = 0;
@@ -781,7 +880,7 @@ local function draw_flanks(dl, x, y, w, h, left, right)
         for i = 1, #left do cursor = paint_segment(dl, cursor, row_y, left[i]); end
     end
     if right ~= nil and #right > 0 then
-        local cursor = math.floor(x + w + GAP + 0.5);
+        local cursor = math.floor((right_at or (x + w)) + GAP + 0.5);
         for i = 1, #right do cursor = paint_segment(dl, cursor, row_y, right[i]); end
     end
 end
@@ -801,9 +900,79 @@ local function draw_bar(dl, x, y, w, h, fill_hpp)
     dl:AddRect({ x, y }, { x + w, y + h }, u32(EDGE, BAR_A), r);
 end
 
+-- The lock frame: the same rounded rect as the bar, grown a pixel at a
+-- time. The outer passes are the faint fringe, the last is the border on
+-- the bar's own edge. Thickness stays 1, so the corner flags can be left
+-- off (0 would square them on 1.80).
+local function lock_stroke(dl, x, y, w, h, radius, alpha)
+    dl:AddRect({ x, y }, { x + w, y + h }, u32(LOCK, alpha), radius);
+end
+
+local function draw_lock(dl, x, y, w, h)
+    x, y = math.floor(x + 0.5), math.floor(y + 0.5);
+    w, h = math.floor(w + 0.5), math.floor(h + 0.5);
+    local r0 = math.min(RADIUS, math.floor(h / 2), math.floor(w / 2));
+    for i = 1, #LOCK_GLOW do
+        local e, a = LOCK_GLOW[i][1], LOCK_GLOW[i][2];
+        local rr = math.min(r0 + e, math.floor((h + e * 2) / 2), math.floor((w + e * 2) / 2));
+        lock_stroke(dl, x - e, y - e, w + e * 2, h + e * 2, rr, a);
+    end
+end
+
+-- "Locked" the way the frame is drawn: each fringe step is a fainter copy
+-- of the word, and the last pass is the word at the border's alpha. The
+-- box sits 1px above the bar, so the fringe meets the stroke. The text
+-- size is the numbers' size. Drawn after the icons so a tall one does not
+-- cover it.
+local function draw_locked(dl, x, y, w)
+    local font = fonts.hud;
+    if font == nil then return; end
+    local px = cfg.text_size;
+    local text = 'Locked';
+    local tw, th = measure(text, px);
+    local tx = math.floor(x + (w - tw) / 2 + 0.5);
+    local ty = math.floor(y - 1 - th + 0.5);
+    for i = 1, #LOCK_GLOW do
+        local e, a = LOCK_GLOW[i][1], LOCK_GLOW[i][2];
+        local col = u32(LOCK, a);
+        if e == 0 then
+            dl:AddText(font, px, { tx, ty }, col, text);
+        else
+            for _, o in ipairs(AROUND) do
+                dl:AddText(font, px, { tx + o[1] * e, ty + o[2] * e }, col, text);
+            end
+        end
+    end
+end
+
 -- An NPC's bar: the background alone, PLATE at PLATE_A, cornered as the bar is.
 local function draw_plate(dl, x, y, w, h)
     fill(dl, x, y, w, h, PLATE, math.min(RADIUS, math.floor(h / 2), math.floor(w / 2)), PLATE_A);
+end
+
+-- Pixels the name and the widest percent need on one line: the edge offset
+-- in from each end, and one gap between them. "100%" is the widest percent,
+-- so the floor does not move as HP does.
+local function tot_need(name)
+    local nw = measure(name, cfg.name_size);
+    local pw = measure('100%', cfg.text_size);
+    return math.ceil(nw + GAP + pw + cfg.edge_offset * 2);
+end
+
+-- The target's target, just to the right of the main bar. The main bar's
+-- height, unless the name or the percent is taller: then it grows, and
+-- stays centred on the main bar, so the line sits inside it.
+local function tot_rect(name, bx, by, bw, bh)
+    local w = cfg.tot_width;
+    local need = tot_need(name);
+    if w < need then w = need; end
+    local _, nh = measure(name, cfg.name_size);
+    local _, ph = measure('100%', cfg.text_size);
+    local h = bh;
+    -- Two pixels over the text box, for the halo, so the line stays inside.
+    local need_h = math.ceil((nh > ph and nh or ph) + 2);
+    if h < need_h then h = need_h; end
+    return bx + bw + TOT_GAP, by + (bh - h) / 2, w, h;
 end
 
 -- The bar's box, `width` wide (the setting's unless given): centered
@@ -823,12 +992,14 @@ end
 -- While the sliders are open, the bar takes the pointer so a drag sets Y
 -- and the click does not also select a monster under it. An error inside
 -- still reaches End, so ImGui stays balanced, and is said once.
-local function drag_y(x, y, w, h)
+-- `anchor` is the main bar's top when the hit box is taller than it.
+local function drag_y(x, y, w, h, anchor)
     imgui.SetNextWindowPos({ x, y }, ImGuiCond_Always);
     imgui.SetNextWindowSize({ w, h }, ImGuiCond_Always);
     imgui.PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
     imgui.PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
     imgui.PushStyleVar(ImGuiStyleVar_WindowMinSize, { 1, 1 });
+    anchor = anchor or y;
     local ok, fault = true, nil;
     if imgui.Begin('TargetBar###targetbar_drag', true, DRAG_FLAGS) then
         ok, fault = pcall(function ()
@@ -837,11 +1008,11 @@ local function drag_y(x, y, w, h)
             if imgui.IsItemHovered() and ImGuiMouseCursor_ResizeNS ~= nil then
                 imgui.SetMouseCursor(ImGuiMouseCursor_ResizeNS);
             end
-            if imgui.IsItemActivated() then drag_origin = y; end
+            if imgui.IsItemActivated() then drag_origin = anchor; end
             if imgui.IsItemActive() and drag_origin ~= nil then
                 local _, dy = xy(imgui.GetMouseDragDelta(0));
                 local _, sh = screen();
-                local ny = clamp(drag_origin + dy, Y_MIN, math.max(Y_MIN, math.floor(sh - h)), y);
+                local ny = clamp(drag_origin + dy, Y_MIN, math.max(Y_MIN, math.floor(sh - cfg.height)), anchor);
                 if ny ~= cfg.y then
                     cfg.y = ny;
                     dirty = true;
@@ -1173,14 +1344,16 @@ local function note(pg, s)
 end
 
 -- The page's groups, top to bottom. A switch: { label, id, key, help }.
--- A slider: { label, id, key, help, min, max }. Bar's three sliders are
--- built as the page is drawn, as Width and Y follow the screen.
+-- A slider: { label, id, key, help, min, max }. Bar's sliders are built as
+-- the page is drawn: Width and Y follow the screen, and the target's
+-- target follows the name it has to hold.
 local SHOW = {
     { 'Name', '##tb_name', 'show_name', 'The name, on the left of the bar. Without it, an NPC draws nothing.' },
     { 'HP %', '##tb_hp', 'show_hp', 'The percent, on the right of the bar.' },
     { 'Detection', '##tb_detect', 'show_detection', 'Aggro and Link on the left of the bar. Senses on the right.' },
     { 'Weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
     { 'Resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
+    { 'Target of target', '##tb_tot', 'show_tot', 'A second bar, to the right, with that target\'s name and HP%.' },
 };
 local SIZES = {
     { 'Name font size', '##tb_name_px', 'name_size', 'Pixels.', NAME_MIN, NAME_MAX },
@@ -1191,7 +1364,7 @@ local SIZES = {
     { 'Edge offset', '##tb_offset_px', 'edge_offset', 'Pixels from the ends of the bar to the name and the HP %.',
         OFFSET_MIN, OFFSET_MAX },
 };
-local BAR_ROWS = 3;
+local BAR_ROWS = 4;
 
 -- The page from the top: the title bar and its line, 10 more, each group's
 -- heading (8 above, 26 for it) and rows, the button's row (a row and 4),
@@ -1212,16 +1385,28 @@ local function slider_row(pg, row, value, min, max)
     end
 end
 
-local function draw_config(has_target)
+local function draw_config(has_target, tot_name)
     tick();
     local sw, sh = screen();
     local _, bar_y, _, bar_h = bar_rect();
     local wmax = math.max(WIDTH_MIN, math.min(WIDTH_MAX, math.floor(sw)));
     local ymax = math.max(Y_MIN, math.floor(sh - bar_h));
+    -- The slider cannot go below the name and the percent on one line.
+    -- A longer name than this one still widens the bar when it is drawn.
+    local tneed = tot_need(tot_name or 'Target');
+    local tmax = math.max(WIDTH_MIN, math.min(WIDTH_MAX, math.floor(sw)));
+    local tmin = tneed;
+    if tmin < WIDTH_MIN then tmin = WIDTH_MIN; end
+    if tmin > tmax then tmin = tmax; end
+    local tval = cfg.tot_width;
+    if tval < tmin then tval = tmin; end
+    if tval > tmax then tval = tmax; end
     local bar_rows = {
         { { 'Width', '##tb_w', 'width', 'Pixels, up to the screen\'s width.' }, math.min(cfg.width, wmax), WIDTH_MIN, wmax },
         { { 'Height', '##tb_h', 'height', 'Pixels.' }, cfg.height, HEIGHT_MIN, HEIGHT_MAX },
         { { 'Y', '##tb_y', 'y', 'Pixels from the top of the screen to the bar.' }, bar_y, Y_MIN, ymax },
+        { { 'Target of target', '##tb_tot_w', 'tot_width',
+            'Pixels. Never narrower than the name and the HP% on one line.' }, tval, tmin, tmax },
     };
     local pw, ph, m = S(PAGE_W), page_height(), S(MARGIN);
     imgui.SetNextWindowPos({ sw / 2, sh / 2 }, ImGuiCond_FirstUseEver, { 0.5, 0.5 });
@@ -1294,7 +1479,8 @@ end
 local function report()
     sanitize();
     local _, y = bar_rect();
-    say(('Width %d, height %d, Y %d%s.'):format(cfg.width, cfg.height, y, cfg.y == nil and ' (centered)' or ''));
+    say(('Width %d, target of target %d, height %d, Y %d%s.'):format(
+        cfg.width, cfg.tot_width, cfg.height, y, cfg.y == nil and ' (centered)' or ''));
 end
 
 local function set_number(key, raw, lo, hi)
@@ -1320,6 +1506,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     local target = read_target();
     -- An NPC's bar is there to hold its name. Without the name, it is no target.
     if target ~= nil and target.npc and not cfg.show_name then target = nil; end
+    local tot = target ~= nil and read_tot(target) or nil;
     local npc = target ~= nil and target.npc;
     local hpp, id;
     if target ~= nil then
@@ -1327,7 +1514,8 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     elseif config_open then
         hpp, id = 100, 'preview';
     else
-        shown_hpp, shown_id = nil, nil;
+        clear_fill(main_fill);
+        clear_fill(tot_fill);
         save_if_idle();
         return;
     end
@@ -1341,11 +1529,35 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     end
     local dl = imgui.GetBackgroundDrawList();
     local label = cfg.show_hp and not npc;
-    local fill_hpp = smooth(id, hpp);
+    local fill_hpp = smooth(main_fill, id, hpp);
+    -- A real target's target, or the preview beside the preview bar. The
+    -- name and the percent always both draw: that bar has its own switch.
+    local tot_name, tot_hpp, tot_id = nil, nil, nil;
+    if cfg.show_tot and tot ~= nil then
+        tot_name, tot_hpp, tot_id = tot.name, tot.hpp, tot.id;
+    elseif cfg.show_tot and target == nil then
+        tot_name, tot_hpp, tot_id = 'Target', 100, 'tot-preview';
+    end
+    -- A real target only. The preview (settings open, nothing targeted) is not locked on.
+    local locked = target ~= nil and target_locked();
     if npc then draw_plate(dl, x, y, w, h); else draw_bar(dl, x, y, w, h, fill_hpp); end
+    -- The frame goes on after the fill, so the border sits on the edge, and
+    -- before the icons, so a fringe that reaches the gap stays under them.
+    if locked then draw_lock(dl, x, y, w, h); end
     if label then pcall(draw_label, dl, x, y, w, h, hpp); end
     if cfg.show_name then
         draw_name(dl, x, y, w, h, target ~= nil and target.name or 'Target', hpp, label, npc and NPC_TEXT or nil);
+    end
+    local right_at, tot_box = nil, nil;
+    if tot_name ~= nil then
+        local tx, ty, tw, th = tot_rect(tot_name, x, y, w, h);
+        draw_bar(dl, tx, ty, tw, th, smooth(tot_fill, tot_id, tot_hpp));
+        pcall(draw_label, dl, tx, ty, tw, th, tot_hpp);
+        draw_name(dl, tx, ty, tw, th, tot_name, tot_hpp, true);
+        right_at = tx + tw;
+        tot_box = { x = tx, y = ty, w = tw, h = th };
+    else
+        clear_fill(tot_fill);
     end
     local res = nil;
     if target == nil then
@@ -1356,11 +1568,19 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     if res ~= nil then
         local rows = rows_of(res);
         draw_resists(dl, x, y, w, h, shown_marks(rows.marks));
-        if cfg.show_detection then draw_flanks(dl, x, y, w, h, rows.left, rows.right); end
+        if cfg.show_detection then draw_flanks(dl, x, y, w, h, rows.left, rows.right, right_at); end
     end
+    if locked then draw_locked(dl, x, y, w); end
     if config_open then
-        drag_y(x, y, w, h);
-        draw_config(target ~= nil);
+        local dx, dy, dw, dh = x, y, w, h;
+        if tot_box ~= nil then
+            local x2 = math.max(x + w, tot_box.x + tot_box.w);
+            local y1 = math.min(y, tot_box.y);
+            local y2 = math.max(y + h, tot_box.y + tot_box.h);
+            dx, dy, dw, dh = x, y1, x2 - x, y2 - y1;
+        end
+        drag_y(dx, dy, dw, dh, y);
+        draw_config(target ~= nil, tot ~= nil and tot.name or 'Target');
     end
     save_if_idle();
 end);
@@ -1381,15 +1601,18 @@ ashita.events.register('command', 'targetbar_command', function (e)
         say(config_open and 'Settings open. /tb closes them.' or 'Settings closed.');
         report();
     elseif sub == 'help' then
-        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, and resistance. /tb width <px>, /tb height <px>, /tb y <px>. /tb reset returns the bar and text sizes and the edge offset, and centers the bar.');
+        say('/tb opens settings. Toggles hide the name, the HP%, detection, weakness, resistance, and the target of target. /tb width <px>, /tb totwidth <px>, /tb height <px>, /tb y <px>. /tb reset returns the bar sizes and the edge offset, and centers the bar.');
     elseif sub == 'width' then
         set_number('width', args[3], WIDTH_MIN, WIDTH_MAX);
+    elseif sub == 'totwidth' then
+        set_number('tot_width', args[3], WIDTH_MIN, WIDTH_MAX);
     elseif sub == 'height' then
         set_number('height', args[3], HEIGHT_MIN, HEIGHT_MAX);
     elseif sub == 'y' then
         set_number('y', args[3], Y_MIN, Y_MAX);
     elseif sub == 'reset' then
         cfg.width, cfg.height, cfg.y = DEFAULT_WIDTH, DEFAULT_HEIGHT, nil;
+        cfg.tot_width = DEFAULT_TOT;
         cfg.name_size, cfg.text_size, cfg.icon_size = DEFAULT_NAME, DEFAULT_TEXT, DEFAULT_ICON;
         cfg.edge_offset = DEFAULT_OFFSET;
         settings.save();
