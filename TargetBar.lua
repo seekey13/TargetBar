@@ -7,9 +7,9 @@ TargetBar is not VanaCore, and isn't made or endorsed by Vekien.
 
 The bar is a rose fill #EE6F78 on a near-black #0C0C0C track, both at
 70%, with a 1px #0C0C0C edge and 4px corners. A partial fill rounds the
-left end only. It draws for mobs, players and pets. An NPC or an object gets
-its name in #C2FFC2 on black at 40%, only as wide as the name, and no
-percent.
+left end only. It draws for mobs, players, pets and trusts. An NPC or an
+object gets its name in #C2FFC2 on black at 40%, only as wide as the name,
+and no percent.
 
 The target's name is inside the bar on the left, white over 75% HP, then
 yellow, orange at 50% and red at 25%. The percent is on the right. Both
@@ -262,9 +262,10 @@ local function fill(dl, x, y, w, h, color, radius, alpha, corners)
     end
 end
 
--- Spawn flags: 0x01 a player, 0x10 a mob (trusts carry it too).
--- An NPC (0x02) or an object has neither, and gets only its name: a
--- shopkeeper with an HP bar is noise. A pet has neither either (see is_pet).
+-- Spawn flags: 0x01 a player, 0x10 a mob. An NPC (0x02) or an object has
+-- neither, and gets only its name: a shopkeeper with an HP bar is noise.
+-- Its HP% is no tell, as the server sends 100 for it. A pet or a trust has
+-- neither flag either (see is_pet and is_trust).
 local function has_flag(flags, bit_)
     return type(flags) == 'number' and bit.band(flags, bit_) ~= 0;
 end
@@ -286,8 +287,8 @@ local function is_pet(entities, index, sid)
     return yes;
 end
 
--- A trust carries the mob flag but is a party member. Its mobdb row, if
--- one matched, would be a namesake's (a BCNM's Shantotto, say).
+-- One's own trust is a party member. Were it to carry the mob flag, its
+-- mobdb row, if one matched, would be a namesake's (a BCNM's Shantotto, say).
 local function in_party(sid)
     local ok, yes = pcall(function ()
         local party = AshitaCore:GetMemoryManager():GetParty();
@@ -299,9 +300,20 @@ local function in_party(sid)
     return ok and yes == true;
 end
 
+-- A trust is flagged as an NPC is, but the client keeps its owner's index
+-- (TrustOwnerTargetIndex), a player's: 0x400 to 0x6FF. Anyone's trust has
+-- it. One's own is also in the party, should the index be left unset.
+local function is_trust(entities, index, sid)
+    if entities ~= nil and type(entities.GetTrustOwnerTargetIndex) == 'function' then
+        local owner = tonumber(entities:GetTrustOwnerTargetIndex(index));
+        if owner ~= nil and owner >= 0x400 and owner <= 0x6FF then return true; end
+    end
+    return in_party(sid);
+end
+
 -- The main target. Index 0 is "no target". HXUI reads this same index and
--- HPPercent. `npc` is neither a mob, a player, nor a pet. Flags that cannot
--- be read keep the bar: an unknown is not taken for an NPC.
+-- HPPercent. `npc` is neither a mob, a player, a pet, nor a trust. Flags
+-- that cannot be read keep the bar: an unknown is not taken for an NPC.
 local function read_target()
     local ok, found = pcall(function ()
         local mm = AshitaCore:GetMemoryManager();
@@ -340,6 +352,7 @@ local function read_target()
         if hpp < 0 then hpp = 0; elseif hpp > 100 then hpp = 100; end
         if sid == nil or sid == 0 then sid = index; end
         local npc = flags ~= nil and not mob and not has_flag(flags, 0x01)
+            and not is_trust(entities, index, sid)
             and not (entities ~= nil and is_pet(entities, index, sid));
         mob = mob and not in_party(sid);
         return { id = sid, hpp = hpp, name = name, index = index, mob = mob, npc = npc };
