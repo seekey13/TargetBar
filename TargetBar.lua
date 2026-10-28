@@ -29,14 +29,15 @@ the bar, and its outline is that same fringe: a fainter red copy of the
 word at each step, then the letters on top. The fringe stops at the gap
 the detection icons start in, so it does not cover them.
 
-To the right of the bar, a second bar shows who that target is targeting.
-The name is on the left and the HP% is on the right, in the same colours,
-at the same edge offset. Its width is a setting. It never draws narrower
-than that name and the percent on one line, and no shorter than that
-line, so both sit inside it. Senses
-sit one gap past it. The client keeps that target on the entity
-(TargetedIndex). It is empty when there is none, and it is not filled in
-for the local player.
+To the right of the bar, an equilateral triangle points at a second bar:
+who that target is targeting. The triangle's left edge is vertical and as
+tall as the HP bar, and it is Sidekick3's MP bar (#E8B45C) at 70%. The
+second bar's name is on the left and the HP% is on the right, in the same
+colours, at the same edge offset. Its width is a setting. It never draws
+narrower than that name and the percent on one line, and no shorter than
+that line, so both sit inside it. Senses sit one gap past it. The client
+keeps that target on the entity (TargetedIndex). It is empty when there
+is none, and it is not filled in for the local player.
 
 Text is Segoe UI Semibold over a 1px black halo at 85%. The name, the
 numbers and the icons each have a size in the settings window.
@@ -47,7 +48,7 @@ GetTarget():GetTargetIndex(0), then that entity's HP percent.
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.4.0';
+addon.version  = '1.4.1';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -101,12 +102,15 @@ local NPC_TEXT, PLATE, PLATE_A = '#C2FFC2', '#000000', 0.40;
 -- Lock-on. LOCK is the fringe on the bar and around the word. LOCK_TEXT
 -- is the letters, its own colour so it can be tried apart from the name.
 -- The fringe is that red gone transparent, not a second colour. The reach
--- is the gap beside the bar (see GAP). The second bar starts past that
--- fringe, then one gap, so the stroke does not cover it.
+-- is the gap beside the bar (see GAP). The pointer and the second bar
+-- start past that fringe, so the stroke does not cover them.
 local LOCK = '#FF4A40';
 local LOCK_TEXT = '#ffb4b4';
 local LOCK_REACH = 4;
-local TOT_GAP = LOCK_REACH + GAP;
+-- Sidekick3's MP bar. The pointer is this yellow, at the bars' 70%.
+local MP = '#E8B45C';
+-- Altitude of an equilateral triangle, as a share of its side.
+local TRI_K = math.sqrt(3) / 2;
 local LOCK_GLOW = {
     { 4, 0.14 },
     { 3, 0.22 },
@@ -950,6 +954,27 @@ local function draw_plate(dl, x, y, w, h)
     fill(dl, x, y, w, h, PLATE, math.min(RADIUS, math.floor(h / 2), math.floor(w / 2)), PLATE_A);
 end
 
+-- The pointer: equilateral, left edge vertical, point to the right. The
+-- edge is the HP bar's height, so the triangle is as tall as that bar.
+-- It starts past the lock fringe. Returns how far the point reaches past
+-- the bar's right edge.
+local function pointer_reach(h)
+    return LOCK_REACH + h * TRI_K;
+end
+
+local function draw_pointer(dl, x, y, w, h)
+    x, y = math.floor(x + 0.5), math.floor(y + 0.5);
+    w, h = math.floor(w + 0.5), math.floor(h + 0.5);
+    local left = x + w + LOCK_REACH;
+    -- Top, point, bottom. That order is clockwise on screen, which is what
+    -- ImGui's anti-aliasing fills.
+    dl:AddTriangleFilled(
+        { left, y },
+        { left + h * TRI_K, y + h / 2 },
+        { left, y + h },
+        u32(MP, BAR_A));
+end
+
 -- Pixels the name and the widest percent need on one line: the edge offset
 -- in from each end, and one gap between them. "100%" is the widest percent,
 -- so the floor does not move as HP does.
@@ -959,9 +984,10 @@ local function tot_need(name)
     return math.ceil(nw + GAP + pw + cfg.edge_offset * 2);
 end
 
--- The target's target, just to the right of the main bar. The main bar's
--- height, unless the name or the percent is taller: then it grows, and
--- stays centred on the main bar, so the line sits inside it.
+-- The target's target, just past the pointer. The main bar's height, unless
+-- the name or the percent is taller: then it grows, and stays centred on
+-- the main bar, so the line sits inside it. One gap after the point, so
+-- the tip does not sit on the bar.
 local function tot_rect(name, bx, by, bw, bh)
     local w = cfg.tot_width;
     local need = tot_need(name);
@@ -972,7 +998,7 @@ local function tot_rect(name, bx, by, bw, bh)
     -- Two pixels over the text box, for the halo, so the line stays inside.
     local need_h = math.ceil((nh > ph and nh or ph) + 2);
     if h < need_h then h = need_h; end
-    return bx + bw + TOT_GAP, by + (bh - h) / 2, w, h;
+    return bx + bw + pointer_reach(bh) + GAP, by + (bh - h) / 2, w, h;
 end
 
 -- The bar's box, `width` wide (the setting's unless given): centered
@@ -1550,6 +1576,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     end
     local right_at, tot_box = nil, nil;
     if tot_name ~= nil then
+        draw_pointer(dl, x, y, w, h);
         local tx, ty, tw, th = tot_rect(tot_name, x, y, w, h);
         draw_bar(dl, tx, ty, tw, th, smooth(tot_fill, tot_id, tot_hpp));
         pcall(draw_label, dl, tx, ty, tw, th, tot_hpp);
