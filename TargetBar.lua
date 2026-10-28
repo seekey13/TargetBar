@@ -35,9 +35,11 @@ tall as the HP bar, and it is Sidekick3's MP bar (#E8B45C) at 70%. The
 second bar's name is on the left and the HP% is on the right, in the same
 colours, at the same edge offset. Its width is a setting. It never draws
 narrower than that name and the percent on one line, and no shorter than
-that line, so both sit inside it. Senses sit one gap past it. The client
-keeps that target on the entity (TargetedIndex). It is empty when there
-is none, and it is not filled in for the local player.
+that line, so both sit inside it. Senses sit one gap past it. A player's
+target is the client's TargetedIndex. It is empty when there is none, and
+it is not filled in for the local player. A mob's battle target is not
+written there. The second bar uses who that mob last swung at, cast on,
+or used a skill on, and whoever holds claim until the mob acts.
 
 Text is Segoe UI Semibold over a 1px black halo at 85%. The name, the
 numbers and the icons each have a size in the settings window.
@@ -48,7 +50,7 @@ GetTarget():GetTargetIndex(0), then that entity's HP percent.
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.4.1';
+addon.version  = '1.4.4';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -409,9 +411,154 @@ local function read_target()
     return nil;
 end
 
--- Who this entity is targeting. TargetedIndex is the client's copy. It is 0
--- with no target, and the local player's is left empty.
-local function targeted_index(index)
+-- Mob target tracking lives in this table. The helpers stay inside the block
+-- so they are not chunk locals: this file is already at LuaJIT's limit of 200.
+-- A server id is normalised here. Packet reads can come back signed, and an
+-- entity id can come back as cdata. Either one would miss the other as a key.
+local track = {};
+do
+local function sid32(v)
+    v = tonumber(v);
+    if v == nil or v == 0 then return nil; end
+    if v < 0 then v = v + 4294967296; end
+    if v <= 0 then return nil; end
+    return v;
+end
+
+-- Server id to entity index. A mob id carries its index when bit 24 is set.
+-- A player or a pet does not, so those are scanned. A miss is remembered for
+-- a second so a draw does not walk the entity list every frame.
+local id_index, id_miss = {}, {};
+local function index_of(sid)
+    sid = sid32(sid);
+    if sid == nil then return nil; end
+    local mm = AshitaCore:GetMemoryManager();
+    local entities = mm ~= nil and mm:GetEntity() or nil;
+    if entities == nil then return nil; end
+    local function sid_at(i)
+        return sid32(entities:GetServerId(i));
+    end
+    local cached = id_index[sid];
+    if cached ~= nil and sid_at(cached) == sid then return cached; end
+    local now = os.clock();
+    local missed = id_miss[sid];
+    if missed ~= nil and now - missed >= 0 and now - missed < 1 then return nil; end
+    local found;
+    if sid % 0x2000000 >= 0x1000000 then
+        local index = sid % 0x1000;
+        if index >= 0x900 then index = index - 0x100; end
+        if index > 0 and index <= 2303 and sid_at(index) == sid then found = index; end
+    end
+    if found == nil then
+        for i = 0x400, 0x8FF do
+            if sid_at(i) == sid then found = i; break; end
+        end
+    end
+    if found == nil then
+        for i = 0, 0x3FF do
+            if sid_at(i) == sid then found = i; break; end
+        end
+    end
+    if found ~= nil then
+        id_index[sid] = found;
+        id_miss[sid] = nil;
+    else
+        id_miss[sid] = now;
+    end
+    return found;
+end
+
+-- Who a mob last acted on, keyed by the actor's server id. The server does
+-- not put a mob's battle target on the entity: m_TargID is filled from a
+-- player's own position packet, so a mob's stays 0 and TargetedIndex stays
+-- empty. The action packet (0x028) names who the swing, spell, or skill was
+-- aimed at. The index is resolved when the bar draws, so a target that was
+-- not in the entity list yet is not dropped. Kept for HIT_FOR seconds.
+local HIT_FOR = 30;
+local hit_of = {};
+local hit_fault;
+function track.hit(e)
+    local ok, err = pcall(function ()
+        local size = tonumber(e.size);
+        if e.data_raw == nil or size == nil or size < 8 then return; end
+        local bit_offset, max_bits = 40, size * 8;
+        local function bits(n)
+            if bit_offset + n > max_bits then max_bits = 0; return 0; end
+            local v = ashita.bits.unpack_be(e.data_raw, 0, bit_offset, n);
+            bit_offset = bit_offset + n;
+            return tonumber(v) or 0;
+        end
+        local actor_id = sid32(bits(32));
+        local count = bits(6);
+        if actor_id == nil or count == 0 or max_bits == 0 then return; end
+        bits(4);
+        local kind = bits(4);
+        -- Spell and item starts split the next word. Everything else is one word.
+        if kind == 8 or kind == 9 then bits(16); bits(16); else bits(32); end
+        bits(32);
+        local tid = sid32(bits(32));
+        -- Melee, ranged, weaponskill, magic, ability, mob skill. Not an item,
+        -- and not a self buff: that would hide who they are fighting.
+        if max_bits == 0 or tid == nil or tid == actor_id then return; end
+        if kind == 0 or kind == 5 or kind == 9 or kind == 10 then return; end
+        -- A player's target is already TargetedIndex. An action must not replace it.
+        local actor = index_of(actor_id);
+        if actor ~= nil and actor >= 0x400 and actor <= 0x6FF then return; end
+        hit_of[actor_id] = { sid = tid, at = os.time() };
+    end);
+    if not ok and hit_fault ~= err then
+        hit_fault = err;
+        pcall(say, 'Target of target: ' .. tostring(err));
+    end
+end
+
+local function hit_sid(actor_sid)
+    actor_sid = sid32(actor_sid);
+    if actor_sid == nil then return nil; end
+    local row = hit_of[actor_sid];
+    if row == nil then return nil; end
+    local age = os.time() - row.at;
+    if age < 0 or age > HIT_FOR then hit_of[actor_sid] = nil; return nil; end
+    return row.sid;
+end
+
+-- 0x00E is the mob and NPC update. The position word can carry a look
+-- target (an index). The claim word is the claimer's server id. Neither is
+-- the battle target, so they are only used until an action says otherwise.
+-- Claim is resolved at draw time: the claimer may not be in the entity list
+-- on the packet that first reports them.
+local face_of, claim_of = {}, {};
+local face_fault;
+function track.face(e)
+    local ok, err = pcall(function ()
+        local size = tonumber(e.size);
+        if size == nil or size < 0x1C then return; end
+        local index = struct.unpack('H', e.data, 0x08 + 1);
+        if index == 0 or index > 2303 then return; end
+        local mask = struct.unpack('B', e.data, 0x0A + 1);
+        if bit.band(mask, 0x20) ~= 0 then
+            face_of[index], claim_of[index] = nil, nil;
+            local sid = sid32(struct.unpack('L', e.data, 0x04 + 1));
+            if sid ~= nil then hit_of[sid] = nil; end
+            return;
+        end
+        if bit.band(mask, 0x01) ~= 0 then
+            local face = bit.rshift(struct.unpack('H', e.data, 0x1A + 1), 1);
+            face_of[index] = (face > 0 and face <= 2303 and face ~= index) and face or nil;
+        end
+        if bit.band(mask, 0x02) ~= 0 and size >= 0x30 then
+            claim_of[index] = sid32(struct.unpack('L', e.data, 0x2C + 1));
+        end
+    end);
+    if not ok and face_fault ~= err then
+        face_fault = err;
+        pcall(say, 'Target of target: ' .. tostring(err));
+    end
+end
+
+-- TargetedIndex is the client's copy for a player. It is 0 with no target,
+-- and the local player's is left empty. It is not filled in for a mob.
+local function client_target(index)
     local tot;
     if type(GetEntity) == 'function' then
         local ent_ok, ent = pcall(GetEntity, index);
@@ -425,14 +572,30 @@ local function targeted_index(index)
             if read_ok then tot = tonumber(read); end
         end
     end
-    return tot;
+    if tot ~= nil and tot > 0 then return tot; end
+    return nil;
 end
 
--- The target's target. The same entity twice is not a second bar.
-local function read_tot(target)
+-- The target's target. A player uses TargetedIndex. A mob uses its last
+-- action, then whoever has claim, then a look target. The same entity twice
+-- is not a second bar.
+function track.read(target)
     if target == nil or type(target.index) ~= 'number' then return nil; end
     local ok, found = pcall(function ()
-        local tot = targeted_index(target.index);
+        local player = target.index >= 0x400 and target.index <= 0x6FF;
+        local tot;
+        if player then
+            tot = client_target(target.index);
+        else
+            local sid = hit_sid(target.id);
+            if sid ~= nil then tot = index_of(sid); end
+            if tot == nil or tot <= 0 then
+                local owner = claim_of[target.index];
+                if owner ~= nil then tot = index_of(owner); end
+            end
+            if tot == nil or tot <= 0 then tot = face_of[target.index]; end
+            if tot == nil or tot <= 0 then tot = client_target(target.index); end
+        end
         if tot == nil then return nil; end
         tot = math.floor(tot);
         if tot <= 0 or tot > 2303 or tot == target.index then return nil; end
@@ -440,6 +603,11 @@ local function read_tot(target)
     end);
     if ok then return found; end
     return nil;
+end
+
+function track.clear()
+    face_of, claim_of, hit_of, id_index, id_miss = {}, {}, {}, {}, {};
+end
 end
 
 -- True while the main target is locked on. The game calls that Notice.
@@ -1525,6 +1693,14 @@ end
 -- Between frames, so Segoe can go into the shared atlas (see BAKE_PX).
 ashita.events.register('load', 'targetbar_load', bake_fonts);
 
+-- 0x00A is zone-in and 0x00B is zone-out. An index from the last zone is
+-- another entity here. 0x00E is a mob update. 0x028 is an action.
+ashita.events.register('packet_in', 'targetbar_packet', function (e)
+    if e.id == 0x00A or e.id == 0x00B then track.clear(); return; end
+    if e.id == 0x00E then track.face(e); return; end
+    if e.id == 0x0028 then track.hit(e); end
+end);
+
 ashita.events.register('d3d_present', 'targetbar_present', function ()
     font_frame();
     load_zone(current_zone());
@@ -1532,7 +1708,7 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     local target = read_target();
     -- An NPC's bar is there to hold its name. Without the name, it is no target.
     if target ~= nil and target.npc and not cfg.show_name then target = nil; end
-    local tot = target ~= nil and read_tot(target) or nil;
+    local tot = target ~= nil and track.read(target) or nil;
     local npc = target ~= nil and target.npc;
     local hpp, id;
     if target ~= nil then
