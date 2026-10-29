@@ -29,13 +29,15 @@ the bar, and its outline is that same fringe: a fainter red copy of the
 word at each step, then the letters on top. The fringe stops at the gap
 the detection icons start in, so it does not cover them.
 
-To the right of the bar, an equilateral triangle points at a second bar:
-who that target is targeting. The triangle's left edge is vertical and as
-tall as the HP bar, and it is Sidekick3's MP bar (#E8B45C) at 70%. The
-second bar's name is on the left and the HP% is on the right, in the same
-colours, at the same edge offset. Its width is a setting. It never draws
-narrower than that name and the percent on one line, and no shorter than
-that line, so both sit inside it. Senses sit one gap past it. A player's
+To the right of the bar, past the detection icons when they are there, a
+second bar shows who that target is targeting. "Target" is centred just
+above it, drawn the same way as "Locked". The second bar's name is on the
+left and the HP% is on the right, in the same colours, at the same edge
+offset. Its width is a setting. It never draws narrower than that name and
+the percent on one line, and no shorter than that line, so both sit inside
+it. The senses sit one gap off the bar. An equilateral triangle, half as
+tall as the bar, starts one gap past them and points at the second bar.
+It is Sidekick3's MP bar (#E8B45C) at 70%. A player's
 target is the client's TargetedIndex. It is empty when there is none, and
 it is not filled in for the local player. A mob's battle target is not
 written there. The second bar uses who that mob last swung at, cast on,
@@ -50,7 +52,7 @@ GetTarget():GetTargetIndex(0), then that entity's HP percent.
 
 addon.name     = 'TargetBar';
 addon.author   = 'Seekey';
-addon.version  = '1.4.4';
+addon.version  = '1.4.7';
 addon.desc     = 'Target HP% bar, anchored to the horizontal center of the screen.';
 addon.commands = { '/tb', '/targetbar' };
 
@@ -101,18 +103,15 @@ local NAME_WHITE, NAME_YELLOW, NAME_ORANGE, NAME_RED = '#FFFFFF', '#E8C84A', '#E
 -- An NPC's bar: its name in pale green on black at 40%.
 local NPC_TEXT, PLATE, PLATE_A = '#C2FFC2', '#000000', 0.40;
 
--- Lock-on. LOCK is the fringe on the bar and around the word. LOCK_TEXT
+-- Lock-on. LOCK is the fringe on the bar and around the words. LOCK_TEXT
 -- is the letters, its own colour so it can be tried apart from the name.
--- The fringe is that red gone transparent, not a second colour. The reach
--- is the gap beside the bar (see GAP). The pointer and the second bar
--- start past that fringe, so the stroke does not cover them.
+-- The fringe is that red gone transparent, not a second colour. It stops
+-- at the gap beside the bar (see GAP), so it does not cover the icons or
+-- the second bar.
 local LOCK = '#FF4A40';
 local LOCK_TEXT = '#ffb4b4';
-local LOCK_REACH = 4;
 -- Sidekick3's MP bar. The pointer is this yellow, at the bars' 70%.
 local MP = '#E8B45C';
--- Altitude of an equilateral triangle, as a share of its side.
-local TRI_K = math.sqrt(3) / 2;
 local LOCK_GLOW = {
     { 4, 0.14 },
     { 3, 0.22 },
@@ -1040,12 +1039,11 @@ local function draw_resists(dl, x, y, w, h, segments)
     end
 end
 
--- Detection, centered on the bar's height. The left group grows left from
--- one gap off the bar, the right group grows right from the bar, or from
--- `right_at` when the target's target takes that side. Icons in a group
--- sit flush: the PNGs carry their own padding.
--- Neither group changes the bar's width or its place on the screen.
-local function draw_flanks(dl, x, y, w, h, left, right, right_at)
+-- Detection, centered on the bar's height. Each group starts one gap off
+-- the bar: the left grows left, the right grows right. Icons in a group
+-- sit flush: the PNGs carry their own padding. The triangle starts one
+-- gap past the right group. Neither group moves the bar.
+local function draw_flanks(dl, x, y, w, h, left, right)
     local row_y = math.floor(y + (h - cfg.icon_size) / 2 + 0.5);
     if left ~= nil and #left > 0 then
         local width = 0;
@@ -1054,7 +1052,7 @@ local function draw_flanks(dl, x, y, w, h, left, right, right_at)
         for i = 1, #left do cursor = paint_segment(dl, cursor, row_y, left[i]); end
     end
     if right ~= nil and #right > 0 then
-        local cursor = math.floor((right_at or (x + w)) + GAP + 0.5);
+        local cursor = math.floor(x + w + GAP + 0.5);
         for i = 1, #right do cursor = paint_segment(dl, cursor, row_y, right[i]); end
     end
 end
@@ -1093,15 +1091,15 @@ local function draw_lock(dl, x, y, w, h)
     end
 end
 
--- "Locked" in LOCK_TEXT. The outline is the frame's fringe: a fainter red
--- copy of the word at each step, then the letters on top. The box sits
--- 1px above the bar, so the glow meets the stroke. The text size is the
--- numbers' size. Drawn after the icons so a tall one does not cover it.
-local function draw_locked(dl, x, y, w)
+-- A word in LOCK_TEXT, centred on the bar. The outline is the frame's
+-- fringe: a fainter red copy of the word at each step, then the letters
+-- on top. The box sits 1px above the bar, so the glow meets the stroke.
+-- The text size is the numbers' size. Drawn after the icons so a tall one
+-- does not cover it. "Locked" and "Target" both use this.
+local function draw_caption(dl, x, y, w, text)
     local font = fonts.hud;
-    if font == nil then return; end
+    if font == nil or text == nil then return; end
     local px = cfg.text_size;
-    local text = 'Locked';
     local tw, th = measure(text, px);
     local tx = math.floor(x + (w - tw) / 2 + 0.5);
     local ty = math.floor(y - 1 - th + 0.5);
@@ -1122,24 +1120,25 @@ local function draw_plate(dl, x, y, w, h)
     fill(dl, x, y, w, h, PLATE, math.min(RADIUS, math.floor(h / 2), math.floor(w / 2)), PLATE_A);
 end
 
--- The pointer: equilateral, left edge vertical, point to the right. The
--- edge is the HP bar's height, so the triangle is as tall as that bar.
--- It starts past the lock fringe. Returns how far the point reaches past
--- the bar's right edge.
+-- The pointer: equilateral, left edge vertical, point to the right. Half
+-- the HP bar's height, and centred on that bar. It starts one gap past
+-- `edge` (the bar, or the detection icons). Returns how far the point
+-- reaches past `edge`.
 local function pointer_reach(h)
-    return LOCK_REACH + h * TRI_K;
+    return GAP + (h / 2) * (math.sqrt(3) / 2);
 end
 
-local function draw_pointer(dl, x, y, w, h)
-    x, y = math.floor(x + 0.5), math.floor(y + 0.5);
-    w, h = math.floor(w + 0.5), math.floor(h + 0.5);
-    local left = x + w + LOCK_REACH;
+local function draw_pointer(dl, edge, y, h)
+    y, h = math.floor(y + 0.5), math.floor(h + 0.5);
+    local side = h / 2;
+    local top = y + (h - side) / 2;
+    local left = math.floor(edge + GAP + 0.5);
     -- Top, point, bottom. That order is clockwise on screen, which is what
     -- ImGui's anti-aliasing fills.
     dl:AddTriangleFilled(
-        { left, y },
-        { left + h * TRI_K, y + h / 2 },
-        { left, y + h },
+        { left, top },
+        { left + side * (math.sqrt(3) / 2), top + side / 2 },
+        { left, top + side },
         u32(MP, BAR_A));
 end
 
@@ -1152,11 +1151,11 @@ local function tot_need(name)
     return math.ceil(nw + GAP + pw + cfg.edge_offset * 2);
 end
 
--- The target's target, just past the pointer. The main bar's height, unless
--- the name or the percent is taller: then it grows, and stays centred on
--- the main bar, so the line sits inside it. One gap after the point, so
--- the tip does not sit on the bar.
-local function tot_rect(name, bx, by, bw, bh)
+-- The target's target, one gap past the pointer. `edge` is the bar's right
+-- side, or the right side of the detection icons when those are drawn.
+-- The main bar's height, unless the name or the percent is taller: then
+-- it grows, and stays centred on the main bar, so the line sits inside it.
+local function tot_rect(name, edge, by, bh)
     local w = cfg.tot_width;
     local need = tot_need(name);
     if w < need then w = need; end
@@ -1166,7 +1165,7 @@ local function tot_rect(name, bx, by, bw, bh)
     -- Two pixels over the text box, for the halo, so the line stays inside.
     local need_h = math.ceil((nh > ph and nh or ph) + 2);
     if h < need_h then h = need_h; end
-    return bx + bw + pointer_reach(bh) + GAP, by + (bh - h) / 2, w, h;
+    return edge + pointer_reach(bh) + GAP, by + (bh - h) / 2, w, h;
 end
 
 -- The bar's box, `width` wide (the setting's unless given): centered
@@ -1547,7 +1546,7 @@ local SHOW = {
     { 'Detection', '##tb_detect', 'show_detection', 'Aggro and Link on the left of the bar. Senses on the right.' },
     { 'Weakness', '##tb_weak', 'show_weakness', 'Damage the mob takes more from.' },
     { 'Resistance', '##tb_resist', 'show_resistance', 'Damage the mob takes less from.' },
-    { 'Target of target', '##tb_tot', 'show_tot', 'A second bar, to the right, with that target\'s name and HP%.' },
+    { 'Target of target', '##tb_tot', 'show_tot', 'A second bar, to the right. Target sits above it, with that target\'s name and HP%.' },
 };
 local SIZES = {
     { 'Name font size', '##tb_name_px', 'name_size', 'Pixels.', NAME_MIN, NAME_MAX },
@@ -1750,30 +1749,38 @@ ashita.events.register('d3d_present', 'targetbar_present', function ()
     if cfg.show_name then
         draw_name(dl, x, y, w, h, target ~= nil and target.name or 'Target', hpp, label, npc and NPC_TEXT or nil);
     end
-    local right_at, tot_box = nil, nil;
-    if tot_name ~= nil then
-        draw_pointer(dl, x, y, w, h);
-        local tx, ty, tw, th = tot_rect(tot_name, x, y, w, h);
-        draw_bar(dl, tx, ty, tw, th, smooth(tot_fill, tot_id, tot_hpp));
-        pcall(draw_label, dl, tx, ty, tw, th, tot_hpp);
-        draw_name(dl, tx, ty, tw, th, tot_name, tot_hpp, true);
-        right_at = tx + tw;
-        tot_box = { x = tx, y = ty, w = tw, h = th };
-    else
-        clear_fill(tot_fill);
-    end
     local res = nil;
     if target == nil then
         res = PREVIEW_MOB;
     elseif target.mob then
         res = find_mob(target.index, target.name);
     end
-    if res ~= nil then
-        local rows = rows_of(res);
-        draw_resists(dl, x, y, w, h, shown_marks(rows.marks));
-        if cfg.show_detection then draw_flanks(dl, x, y, w, h, rows.left, rows.right, right_at); end
+    local rows = res ~= nil and rows_of(res) or nil;
+    -- The senses take the gap beside the bar. The triangle starts one gap
+    -- past them, and the second bar one gap past its point.
+    local edge = x + w;
+    if rows ~= nil and cfg.show_detection and rows.right ~= nil then
+        local width = 0;
+        for i = 1, #rows.right do width = width + segment_width(rows.right[i]); end
+        if width > 0 then edge = edge + GAP + width; end
     end
-    if locked then draw_locked(dl, x, y, w); end
+    local tot_box = nil;
+    if tot_name ~= nil then
+        draw_pointer(dl, edge, y, h);
+        local tx, ty, tw, th = tot_rect(tot_name, edge, y, h);
+        draw_bar(dl, tx, ty, tw, th, smooth(tot_fill, tot_id, tot_hpp));
+        pcall(draw_label, dl, tx, ty, tw, th, tot_hpp);
+        draw_name(dl, tx, ty, tw, th, tot_name, tot_hpp, true);
+        tot_box = { x = tx, y = ty, w = tw, h = th };
+    else
+        clear_fill(tot_fill);
+    end
+    if rows ~= nil then
+        draw_resists(dl, x, y, w, h, shown_marks(rows.marks));
+        if cfg.show_detection then draw_flanks(dl, x, y, w, h, rows.left, rows.right); end
+    end
+    if locked then draw_caption(dl, x, y, w, 'Locked'); end
+    if tot_box ~= nil then draw_caption(dl, tot_box.x, tot_box.y, tot_box.w, 'Target'); end
     if config_open then
         local dx, dy, dw, dh = x, y, w, h;
         if tot_box ~= nil then
